@@ -746,22 +746,31 @@ def show_day():
 
     st.markdown("", unsafe_allow_html=True)
 
-    # =================================================
+  # =================================================
     # DAY DATA
     # =================================================
-
+    
     workers = []
     off_staff = []
-
+    
+    def shift_start_time(shift):
+    
+        try:
+            if " - " in shift:
+                return int(shift.split(" - ")[0].split(":")[0])
+        except:
+            pass
+    
+        return 99
+    
     roles = get_employee_roles()
-
+    
     for _, row in df.iterrows():
-
+    
         name = str(row.get("Name", ""))
         shift = str(row.get(active_col, "OFF"))
-
         role = roles.get(name, "Associate")
-
+    
         if shift.upper() in ["OFF", "HOLIDAY", ""]:
             off_staff.append({
                 "Name": name,
@@ -774,24 +783,34 @@ def show_day():
                 "Role": role,
                 "Shift": shift
             })
-
+    
+    # SORT AFTER POPULATING
+    workers = sorted(
+        workers,
+        key=lambda x: (shift_start_time(x["Shift"]), x["Name"])
+    )
+    
+    off_staff = sorted(
+        off_staff,
+        key=lambda x: x["Name"]
+    )
+    
     # =================================================
     # METRICS
     # =================================================
-
+    
     total_hours = 0
-
+    
     for x in workers:
         total_hours += calc_hours(x["Shift"])
-
+    
     m1, m2, m3 = st.columns(3)
-
+    
     m1.metric("Working", len(workers))
     m2.metric("Off", len(off_staff))
     m3.metric("Hours", total_hours)
-
+    
     st.divider()
-
     # =================================================
     # WORKING STAFF
     # =================================================
