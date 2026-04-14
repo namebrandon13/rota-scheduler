@@ -455,10 +455,19 @@ def employee_form(row_data=None, index=None):
                     if fixed_enabled else ""
             }
 
-            if is_edit:
+           if is_edit:
 
-                for k, v in new_row.items():
-                    df.at[index, k] = v
+                for k, v in new.items():
+            
+                    # Create column if missing
+                    if k not in df.columns:
+                        df[k] = ""
+            
+                    # Convert column to object dtype safely
+                    df[k] = df[k].astype("object")
+            
+                    # Assign value
+                    df.loc[index, k] = v
 
             else:
 
