@@ -5,6 +5,21 @@ import os
 import math
 import subprocess
 
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+EMP_FILE = os.path.join(BASE_DIR, "Book(Employees)_01.xlsx")
+HOLIDAY_FILE = os.path.join(BASE_DIR, "Holidaydata.xlsx")
+EVENT_FILE = os.path.join(BASE_DIR, "EventsData.xlsx")
+OUTPUT_FILE = os.path.join(BASE_DIR, "Final_Rota_MultiSheet.xlsx")
+EVENT_SCRIPT = os.path.join(BASE_DIR, "eventapicall.py")
+
+# Try to import openpyxl
+try:
+    from openpyxl import load_workbook
+    from openpyxl.styles import PatternFill
+except:
+    print("openpyxl unavailable")
 # Try to import openpyxl for highlighting
 try:
     from openpyxl import load_workbook
@@ -78,22 +93,30 @@ def parse_fixed_shifts(raw):
     return result
 
 def run_event_tracker():
-    """Executes the separate eventapi.py script to refresh EventsData.xlsx"""
     print("--- 0. UPDATING EVENT INTELLIGENCE ---")
+
     try:
-        if os.path.exists("eventapicall.py"):
-            print("  > Found eventapicall.py, running scan...")
-            result = subprocess.run(["python", "eventapicall.py"], capture_output=True, text=True)
+        if os.path.exists(EVENT_SCRIPT):
+
+            result = subprocess.run(
+                [sys.executable, EVENT_SCRIPT],
+                capture_output=True,
+                text=True,
+                cwd=BASE_DIR
+            )
+
             if result.returncode == 0:
-                print("  > Event Scan Complete.")
+                print("Event scan complete.")
             else:
-                print("  > Event Scan Error:", result.stderr)
+                print("Event scan error:", result.stderr)
+
         else:
-            print("  > 'eventapicall.py' not found. Skipping scan.")
-            
+            print("eventapicall.py not found.")
+
     except Exception as e:
-        print(f"  > Failed to run event scanner: {e}")
-    print("--------------------------------------\n")
+        print("Event scanner failed:", e)
+
+    print("----------------------------------")
 
 def apply_formatting_to_sheet(ws, daily_shop_hours, event_info_map, approved_holidays):
     """
@@ -215,9 +238,9 @@ def solve_rota_final_v14(emp_file, holiday_file, target_weeks=None):
 
     # Load Events Info for Highlighting
     event_info_map = {}
-    if os.path.exists('EventsData.xlsx'):
+    if os.path.exists(EVENT_FILE):
         try:
-            df_ev = pd.read_excel('EventsData.xlsx')
+            df_ev = pd.read_excel(EVENT_FILE)
             for _, row in df_ev.iterrows():
                 d_str = pd.to_datetime(row['Date']).strftime('%Y-%m-%d')
                 t_str = str(row['Start Time'])
@@ -597,7 +620,7 @@ def solve_rota_final_v14(emp_file, holiday_file, target_weeks=None):
 
     # --- WRITE TO EXCEL (MULTI-SHEET) ---
     if weekly_dataframes:
-        output_file = 'Final_Rota_MultiSheet.xlsx'
+        output_file = OUTPUT_FILE
         print(f"\n--- WRITING TO EXCEL: {output_file} ---")
         
         # 1. Load ALL existing sheets from the file (if it exists), so we don't lose them
@@ -650,4 +673,7 @@ def solve_rota_final_v14(emp_file, holiday_file, target_weeks=None):
 
 # Run
 if __name__ == "__main__":
-    solve_rota_final_v14('Book(Employees)_01.xlsx', 'Holidaydata.xlsx')
+    solve_rota_final_v14(
+        EMP_FILE,
+        HOLIDAY_FILE
+    )
