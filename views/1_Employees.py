@@ -53,16 +53,24 @@ DAY_FIXES = {
 
 st.markdown("""
 <style>
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&display=swap');
-html,body,[class*="css"]{font-family:'Inter',sans-serif;}
-.page-title{font-size:2em;font-weight:900;color:#1E293B;}
-.page-sub{color:#64748B;margin-bottom:12px;}
+html, body, [class*="css"]{
+    font-family: Inter, sans-serif;
+}
+.page-title{
+    font-size:2rem;
+    font-weight:800;
+    color:#111827;
+}
+.page-sub{
+    color:#6B7280;
+    margin-bottom:12px;
+}
 .role-badge{
-display:inline-block;
-padding:4px 10px;
-border-radius:20px;
-font-size:0.75em;
-font-weight:700;
+    display:inline-block;
+    padding:4px 10px;
+    border-radius:20px;
+    font-size:0.75rem;
+    font-weight:700;
 }
 </style>
 """, unsafe_allow_html=True)
@@ -93,7 +101,7 @@ def clean_days(raw):
 
 def ensure_columns(df):
 
-    needed = [
+    cols = [
         "ID",
         "Name",
         "Designation",
@@ -106,7 +114,7 @@ def ensure_columns(df):
         "Fixed Weekly Shift"
     ]
 
-    for c in needed:
+    for c in cols:
         if c not in df.columns:
             df[c] = ""
 
@@ -220,12 +228,10 @@ def employee_form(row_data=None, index=None):
                     parts[2]
                 )
 
-    st.markdown("### Employee Profile")
-
     fixed_enabled = st.checkbox(
         "Enable Fixed Shifts",
         value=fixed_enabled_saved,
-        key=f"fixed_{emp_ref}"
+        key=f"fx_main_{emp_ref}"
     )
 
     with st.form(f"form_{emp_ref}"):
@@ -236,9 +242,9 @@ def employee_form(row_data=None, index=None):
             "🔒 Fixed Shifts"
         ])
 
-        # ------------------------------------
+        # =====================================
         # BASIC
-        # ------------------------------------
+        # =====================================
 
         with tabs[0]:
 
@@ -274,10 +280,7 @@ def employee_form(row_data=None, index=None):
                     "Min Contract Hours",
                     0, 60,
                     value=int(float(
-                        gv(
-                            "Minimum Contractual Hours",
-                            0
-                        )
+                        gv("Minimum Contractual Hours", 0)
                     ))
                 )
 
@@ -285,26 +288,20 @@ def employee_form(row_data=None, index=None):
                     "Max Weekly Hours",
                     0, 70,
                     value=int(float(
-                        gv(
-                            "Max Weekly Hours",
-                            40
-                        )
+                        gv("Max Weekly Hours", 40)
                     ))
                 )
 
                 trained = st.checkbox(
                     "Opening Trained?",
                     value=is_opening_trained(
-                        gv(
-                            "Opening Trained",
-                            "No"
-                        )
+                        gv("Opening Trained", "No")
                     )
                 )
 
-        # ------------------------------------
+        # =====================================
         # AVAILABILITY
-        # ------------------------------------
+        # =====================================
 
         with tabs[1]:
 
@@ -324,7 +321,7 @@ def employee_form(row_data=None, index=None):
                         key=f"av_{day}_{emp_ref}"
                     )
 
-            unavailable_days = [
+            unavailable = [
                 d for d, ok in availability.items()
                 if not ok
             ]
@@ -332,21 +329,19 @@ def employee_form(row_data=None, index=None):
             preferred = st.multiselect(
                 "Preferred Days",
                 DAYS,
-                default=[
-                    d for d in saved_preferred
-                    if d in DAYS
-                ]
+                default=saved_preferred
             )
 
-        # ------------------------------------
+        # =====================================
         # FIXED SHIFTS
-        # ------------------------------------
+        # =====================================
 
         with tabs[2]:
 
             fixed_rows = []
 
             if not fixed_enabled:
+
                 st.info(
                     "Enable Fixed Shifts above first."
                 )
@@ -363,6 +358,7 @@ def employee_form(row_data=None, index=None):
                     if has_saved:
 
                         try:
+
                             s = fixed_map[day][0]
                             e = fixed_map[day][1]
 
@@ -381,16 +377,18 @@ def employee_form(row_data=None, index=None):
 
                     st.markdown(f"**{day}**")
 
-                    a, b, c = st.columns([1.1, 1, 1])
+                    a, b, c = st.columns([1,1,1])
 
                     with a:
+
                         enabled = st.checkbox(
                             "Work",
                             value=has_saved,
-                            key=f"fx_{day}_{emp_ref}"
+                            key=f"work_{day}_{emp_ref}"
                         )
 
                     with b:
+
                         start_t = st.time_input(
                             "Start",
                             value=ds,
@@ -398,6 +396,7 @@ def employee_form(row_data=None, index=None):
                         )
 
                     with c:
+
                         end_t = st.time_input(
                             "End",
                             value=de,
@@ -412,7 +411,15 @@ def employee_form(row_data=None, index=None):
                             f"{end_t.strftime('%H:%M')}"
                         )
 
-        if st.form_submit_button("💾 Save Employee", type="primary", use_container_width=True):
+        submitted = st.form_submit_button(
+            "💾 Save Employee",
+            type="primary",
+            use_container_width=True
+        )
+
+        if submitted:
+
+            fixed_text = ";".join(fixed_rows)
 
             new = {
                 "ID": emp_id,
@@ -423,31 +430,35 @@ def employee_form(row_data=None, index=None):
                 "Opening Trained": "Yes" if trained else "No",
                 "Preferred Day": ",".join(preferred),
                 "Unavailable Days": ",".join(unavailable),
-                "Fixed Shifts Enabled": "Yes" if fixed_enabled else "No",
-                "Fixed Shifts Data": fixed_json
+                "Fixed Shift Enabled": "Yes" if fixed_enabled else "No",
+                "Fixed Weekly Shift": fixed_text
             }
-        
+
             df = load_data()
-        
+
             if is_edit:
-        
+
                 for k, v in new.items():
-        
+
                     if k not in df.columns:
                         df[k] = ""
-        
+
                     df[k] = df[k].astype("object")
                     df.loc[index, k] = v
-        
+
                 st.toast(f"✅ Updated {name}")
-        
+
             else:
-        
+
                 new_df = pd.DataFrame([new]).astype("object")
-                df = pd.concat([df.astype("object"), new_df], ignore_index=True)
-        
+
+                df = pd.concat(
+                    [df.astype("object"), new_df],
+                    ignore_index=True
+                )
+
                 st.toast(f"✅ Added {name}")
-        
+
             save_data(df)
             st.rerun()
 
@@ -467,9 +478,12 @@ st.markdown(
 
 df = load_data()
 
+# Controls
+
 c1, c2, c3 = st.columns([1.2, 2.2, 1.5])
 
 with c1:
+
     if st.button(
         "➕ Add Employee",
         type="primary",
@@ -478,16 +492,20 @@ with c1:
         employee_form()
 
 with c2:
+
     search = st.text_input(
         "Search",
         placeholder="Name or ID"
     )
 
 with c3:
+
     role_filter = st.selectbox(
         "Role",
         ["All"] + ROLE_ORDER
     )
+
+# Filters
 
 df_show = df.copy()
 
@@ -513,6 +531,8 @@ if role_filter != "All":
 
 st.divider()
 
+# Table
+
 if df_show.empty:
 
     st.info("No employees found.")
@@ -522,10 +542,7 @@ else:
     for idx, row in df_show.iterrows():
 
         role = str(
-            row.get(
-                "Designation",
-                "Associate"
-            )
+            row.get("Designation", "Associate")
         )
 
         clr = ROLE_COLORS.get(
@@ -536,7 +553,7 @@ else:
         with st.container(border=True):
 
             a, b, c, d, e = st.columns(
-                [2.1, 1.4, 1.2, 2.7, 0.6]
+                [2.2, 1.5, 1.2, 2.8, 0.6]
             )
 
             a.markdown(
@@ -548,7 +565,7 @@ else:
                 <span class='role-badge'
                 style='background:{clr["bg"]};
                 color:{clr["text"]};
-                border:1px solid {clr["border"]}'>
+                border:1px solid {clr["border"]};'>
                 {role}
                 </span>
                 """,
@@ -565,7 +582,7 @@ else:
             ) == "Yes":
 
                 d.caption(
-                    row["Fixed Weekly Shift"]
+                    str(row["Fixed Weekly Shift"])
                 )
 
             else:
