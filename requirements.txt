@@ -1,32 +1,8 @@
-import streamlit as st
-import pandas as pd
-import os
-from datetime import time
-import streamlit as st
-import pandas as pd
-import os, calendar
-from datetime import datetime, date, time, timedelta
-import streamlit as st
-import pandas as pd
-import os
-import calendar
-from datetime import datetime, date, timedelta
-import streamlit as st
-import pandas as pd
-import os, subprocess, sys, calendar
-from datetime import datetime, date, timedelta
-import pydeck as pdk
-import streamlit as st
-import pandas as pd
-import os, time, io, calendar
-from datetime import datetime, date, timedelta
-from reportlab.lib import colors
-from reportlab.lib.pagesizes import landscape, letter
-from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph
-from reportlab.lib.styles import getSampleStyleSheet
-import pandas as pd
-from ortools.sat.python import cp_model
-from datetime import datetime, timedelta
-import os
-import math
-import subprocess
+streamlit
+pandas
+openpyxl
+pydeck
+reportlab
+ortools
+numpy
+xlsxwriter
