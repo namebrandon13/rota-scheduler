@@ -111,17 +111,12 @@ def load_all():
 
 
 @st.cache_data(ttl=10)
-def get_sched_weeks():
+def get_week_start(d):
 
-    df = load_all()
+    if hasattr(d, "date"):
+        d = d.date()
 
-    if df.empty:
-        return set()
-
-    return {
-        get_week_start(d).date()
-        for d in df["Date"]
-    }
+    return d - timedelta(days=d.weekday())
 
 
 def save_all(df):
