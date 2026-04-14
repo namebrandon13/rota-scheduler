@@ -291,9 +291,7 @@ def show_week_view():
         st.warning("No data found.")
         return
 
-    df_all["_ws"] = df_all["Date"].apply(
-        lambda x: get_week_start(x).date()
-    )
+    df_all["_ws"] = df_all["Date"].apply(lambda x: get_week_start(x))  # ✅ No extra .date()
 
     wd = df_all[df_all["_ws"] == ws].copy()
 
