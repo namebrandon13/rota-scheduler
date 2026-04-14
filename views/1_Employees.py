@@ -412,73 +412,43 @@ def employee_form(row_data=None, index=None):
                             f"{end_t.strftime('%H:%M')}"
                         )
 
-        submitted = st.form_submit_button(
-            "💾 Save Changes",
-            type="primary",
-            use_container_width=True
-        )
+        if st.form_submit_button("💾 Save Employee", type="primary", use_container_width=True):
 
-        if submitted:
-
-            if not name.strip():
-                st.error("Name required.")
-                st.stop()
-
-            if not str(emp_id).strip():
-                st.error("Staff ID required.")
-                st.stop()
-
-            df = load_data()
-
-            if not is_edit:
-
-                if str(emp_id) in df["ID"].astype(str).tolist():
-                    st.error("Staff ID already exists.")
-                    st.stop()
-
-            new_row = {
-                "ID": str(emp_id).strip(),
-                "Name": name.strip(),
+            new = {
+                "ID": emp_id,
+                "Name": name,
                 "Designation": role,
                 "Minimum Contractual Hours": min_h,
                 "Max Weekly Hours": max_h,
-                "Opening Trained":
-                    "Yes" if trained else "No",
-                "Preferred Day":
-                    ", ".join(preferred),
-                "Unavailable Days":
-                    ", ".join(unavailable_days),
-                "Fixed Shift Enabled":
-                    "Yes" if fixed_enabled else "No",
-                "Fixed Weekly Shift":
-                    ";".join(fixed_rows)
-                    if fixed_enabled else ""
+                "Opening Trained": "Yes" if trained else "No",
+                "Preferred Day": ",".join(preferred),
+                "Unavailable Days": ",".join(unavailable),
+                "Fixed Shifts Enabled": "Yes" if fixed_enabled else "No",
+                "Fixed Shifts Data": fixed_json
             }
-
+        
+            df = load_data()
+        
             if is_edit:
-            
+        
                 for k, v in new.items():
-            
-                    # Create column if missing
+        
                     if k not in df.columns:
                         df[k] = ""
-            
-                    # Convert column to object dtype safely
+        
                     df[k] = df[k].astype("object")
-            
-                    # Assign value
                     df.loc[index, k] = v
-
+        
+                st.toast(f"✅ Updated {name}")
+        
             else:
-
-                df = pd.concat(
-                    [df, pd.DataFrame([new_row])],
-                    ignore_index=True
-                )
-
+        
+                new_df = pd.DataFrame([new]).astype("object")
+                df = pd.concat([df.astype("object"), new_df], ignore_index=True)
+        
+                st.toast(f"✅ Added {name}")
+        
             save_data(df)
-
-            st.success("Saved successfully.")
             st.rerun()
 
 # ======================================================
