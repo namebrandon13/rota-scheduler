@@ -122,37 +122,20 @@ def load_all():
 
 def save_all(df):
 
-    if os.path.exists(FILE_PATH):
+    with pd.ExcelWriter(
+        FILE_PATH,
+        engine="openpyxl",
+        mode="a",
+        if_sheet_exists="replace"
+    ) as writer:
 
-        with pd.ExcelWriter(
-            FILE_PATH,
-            engine="openpyxl",
-            mode="a",
-            if_sheet_exists="replace"
-        ) as writer:
+        df.to_excel(
+            writer,
+            sheet_name="Shift Templates",
+            index=False
+        )
 
-            df.to_excel(
-                writer,
-                sheet_name=SHEET,
-                index=False
-            )
-
-    else:
-
-        with pd.ExcelWriter(
-            FILE_PATH,
-            engine="openpyxl",
-            mode="w"
-        ) as writer:
-
-            df.to_excel(
-                writer,
-                sheet_name=SHEET,
-                index=False
-            )
-
-    load_all.clear()
-    get_sched_weeks.clear()
+    st.cache_data.clear()
 
 
 def nav_to(view, ws=None):
