@@ -455,8 +455,8 @@ def employee_form(row_data=None, index=None):
                     if fixed_enabled else ""
             }
 
-           if is_edit:
-
+            if is_edit:
+            
                 for k, v in new.items():
             
                     # Create column if missing
