@@ -72,6 +72,17 @@ for k, v in defaults.items():
 # HELPERS
 # ======================================================
 
+def load_all():
+    try:
+        return pd.read_excel(FILE_PATH, sheet_name="Shift Templates")
+    except:
+        return pd.DataFrame()
+
+def get_week_start(d):
+    if hasattr(d, "date"):
+        d = d.date()
+    return d - timedelta(days=d.weekday())
+
 def get_week_start(d):
     if isinstance(d, datetime):
         d = d.date()
