@@ -411,7 +411,7 @@ with st.sidebar:
     gen = get_generated_weeks()
     sched = get_scheduling_weeks()
 
-    st.markdown("### 📊 Overview")
+    st.markdown("### 📊 Overview", unsafe_allow_html=True)
 
     st.metric(
         "Rotas Ready",
@@ -428,11 +428,11 @@ with st.sidebar:
         ws = st.session_state.week_start
         we = ws + timedelta(days=6)
 
-        st.markdown("---")
+        st.markdown("---", unsafe_allow_html=True)
 
         st.markdown(
             f"**📅 {ws.strftime('%d %b')} - {we.strftime('%d %b %Y')}**"
-        )
+        , unsafe_allow_html=True)
 
 # =====================================================
 # VIEW 1 : CALENDAR
@@ -474,7 +474,7 @@ def show_calendar():
 
         st.markdown(
             f"## {datetime(yr, mo, 1).strftime('%B %Y')}"
-        )
+        , unsafe_allow_html=True)
 
     with c3:
 
@@ -796,7 +796,7 @@ def show_day():
     # WORKING STAFF
     # =================================================
 
-    st.markdown("### 👷 Working Staff")
+    st.markdown("### 👷 Working Staff", unsafe_allow_html=True)
 
     if not workers:
         st.info("Nobody working.")
@@ -858,7 +858,7 @@ def show_day():
     # OFF STAFF
     # =================================================
 
-    st.markdown("### 💤 Off / Holiday")
+    st.markdown("### 💤 Off / Holiday", unsafe_allow_html=True)
 
     if not off_staff:
         st.success("Everyone scheduled.")
