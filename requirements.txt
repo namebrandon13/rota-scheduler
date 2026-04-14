@@ -6,3 +6,4 @@ reportlab
 ortools
 numpy
 xlsxwriter
+beautifulsoup4
