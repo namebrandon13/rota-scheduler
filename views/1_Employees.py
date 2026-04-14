@@ -4,10 +4,15 @@ import os
 from datetime import time
 
 # ======================================================
-# CONFIG
+# CLOUD READY PATHS
 # ======================================================
 
-FILE_PATH = "Book(Employees)_01.xlsx"
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+FILE_PATH = os.path.join(BASE_DIR, "Book(Employees)_01.xlsx")
+
+# ======================================================
+# CONFIG
+# ======================================================
 
 ROLE_ORDER = [
     "Manager",
@@ -26,13 +31,8 @@ ROLE_COLORS = {
 DEFAULT_ROLE = {"bg": "#F1F5F9", "text": "#374151", "border": "#CBD5E1"}
 
 DAYS = [
-    "Monday",
-    "Tuesday",
-    "Wednesday",
-    "Thursday",
-    "Friday",
-    "Saturday",
-    "Sunday"
+    "Monday", "Tuesday", "Wednesday",
+    "Thursday", "Friday", "Saturday", "Sunday"
 ]
 
 DAY_FIXES = {
@@ -54,41 +54,15 @@ DAY_FIXES = {
 st.markdown("""
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&display=swap');
-
-html, body, [class*="css"] {
-    font-family: 'Inter', sans-serif;
-}
-
-div[data-testid="stButton"] > button {
-    border-radius: 8px;
-    font-weight: 600;
-    font-size: 0.82em;
-}
-
-div[data-testid="stMetric"] {
-    background: white;
-    border: 1px solid #E2E8F0;
-    border-radius: 12px;
-    padding: 14px;
-}
-
-.page-title {
-    font-size: 2em;
-    font-weight: 900;
-    color: #1E293B;
-}
-
-.page-sub {
-    color: #64748B;
-    margin-bottom: 12px;
-}
-
-.role-badge {
-    display:inline-block;
-    padding:4px 10px;
-    border-radius:20px;
-    font-size:0.75em;
-    font-weight:700;
+html,body,[class*="css"]{font-family:'Inter',sans-serif;}
+.page-title{font-size:2em;font-weight:900;color:#1E293B;}
+.page-sub{color:#64748B;margin-bottom:12px;}
+.role-badge{
+display:inline-block;
+padding:4px 10px;
+border-radius:20px;
+font-size:0.75em;
+font-weight:700;
 }
 </style>
 """, unsafe_allow_html=True)
@@ -98,10 +72,12 @@ div[data-testid="stMetric"] {
 # ======================================================
 
 def clean_days(raw):
+
     vals = str(raw).split(",")
     cleaned = []
 
     for v in vals:
+
         d = v.strip()
 
         if not d:
@@ -116,6 +92,7 @@ def clean_days(raw):
 
 
 def ensure_columns(df):
+
     needed = [
         "ID",
         "Name",
@@ -137,12 +114,19 @@ def ensure_columns(df):
 
 
 def load_data():
+
     if not os.path.exists(FILE_PATH):
         return ensure_columns(pd.DataFrame())
 
     try:
-        df = pd.read_excel(FILE_PATH, sheet_name="Employees")
+
+        df = pd.read_excel(
+            FILE_PATH,
+            sheet_name="Employees"
+        )
+
         df.columns = df.columns.str.strip()
+
         return ensure_columns(df)
 
     except:
@@ -150,25 +134,43 @@ def load_data():
 
 
 def save_data(df):
+
     df = ensure_columns(df.copy())
 
-    with pd.ExcelWriter(
-        FILE_PATH,
-        engine="openpyxl",
-        mode="a",
-        if_sheet_exists="replace"
-    ) as writer:
+    if os.path.exists(FILE_PATH):
 
-        df.to_excel(
-            writer,
-            sheet_name="Employees",
-            index=False
-        )
+        with pd.ExcelWriter(
+            FILE_PATH,
+            engine="openpyxl",
+            mode="a",
+            if_sheet_exists="replace"
+        ) as writer:
+
+            df.to_excel(
+                writer,
+                sheet_name="Employees",
+                index=False
+            )
+
+    else:
+
+        with pd.ExcelWriter(
+            FILE_PATH,
+            engine="openpyxl",
+            mode="w"
+        ) as writer:
+
+            df.to_excel(
+                writer,
+                sheet_name="Employees",
+                index=False
+            )
 
 
 def is_opening_trained(v):
-    return str(v).strip().lower() in ["yes", "true", "1"]
-
+    return str(v).strip().lower() in [
+        "yes", "true", "1"
+    ]
 
 # ======================================================
 # EMPLOYEE FORM
@@ -206,57 +208,44 @@ def employee_form(row_data=None, index=None):
 
     fixed_map = {}
 
-    if raw_fixed and raw_fixed != "nan":
+    if raw_fixed not in ["", "nan"]:
+
         for item in raw_fixed.split(";"):
+
             parts = item.split("|")
+
             if len(parts) == 3:
                 fixed_map[parts[0]] = (
                     parts[1],
                     parts[2]
                 )
 
-    # -----------------------------------
-    # HEADER
-    # -----------------------------------
-
-    if is_edit:
-        st.markdown("### ✏️ Edit Employee")
-    else:
-        st.markdown("### ➕ Add Employee")
-
-    # -----------------------------------
-    # LIVE TOGGLE OUTSIDE FORM
-    # -----------------------------------
+    st.markdown("### Employee Profile")
 
     fixed_enabled = st.checkbox(
         "Enable Fixed Shifts",
         value=fixed_enabled_saved,
-        key=f"fixedshift_{emp_ref}"
+        key=f"fixed_{emp_ref}"
     )
 
-    st.divider()
-
-    # -----------------------------------
-    # FORM
-    # -----------------------------------
-
-    with st.form(f"employee_form_{emp_ref}"):
+    with st.form(f"form_{emp_ref}"):
 
         tabs = st.tabs([
-            "👤 Basic Info",
+            "👤 Basic",
             "📅 Availability",
             "🔒 Fixed Shifts"
         ])
 
-        # =====================================
-        # TAB 1 BASIC INFO
-        # =====================================
+        # ------------------------------------
+        # BASIC
+        # ------------------------------------
 
         with tabs[0]:
 
             c1, c2 = st.columns(2)
 
             with c1:
+
                 name = st.text_input(
                     "Full Name",
                     value=str(gv("Name", ""))
@@ -280,11 +269,15 @@ def employee_form(row_data=None, index=None):
                 )
 
             with c2:
+
                 min_h = st.number_input(
                     "Min Contract Hours",
                     0, 60,
                     value=int(float(
-                        gv("Minimum Contractual Hours", 0)
+                        gv(
+                            "Minimum Contractual Hours",
+                            0
+                        )
                     ))
                 )
 
@@ -292,20 +285,26 @@ def employee_form(row_data=None, index=None):
                     "Max Weekly Hours",
                     0, 70,
                     value=int(float(
-                        gv("Max Weekly Hours", 40)
+                        gv(
+                            "Max Weekly Hours",
+                            40
+                        )
                     ))
                 )
 
                 trained = st.checkbox(
                     "Opening Trained?",
                     value=is_opening_trained(
-                        gv("Opening Trained", "No")
+                        gv(
+                            "Opening Trained",
+                            "No"
+                        )
                     )
                 )
 
-        # =====================================
-        # TAB 2 AVAILABILITY
-        # =====================================
+        # ------------------------------------
+        # AVAILABILITY
+        # ------------------------------------
 
         with tabs[1]:
 
@@ -316,7 +315,9 @@ def employee_form(row_data=None, index=None):
             availability = {}
 
             for i, day in enumerate(DAYS):
+
                 with cols[i]:
+
                     availability[day] = st.checkbox(
                         day[:3],
                         value=(day not in saved_unavailable),
@@ -331,12 +332,15 @@ def employee_form(row_data=None, index=None):
             preferred = st.multiselect(
                 "Preferred Days",
                 DAYS,
-                default=saved_preferred
+                default=[
+                    d for d in saved_preferred
+                    if d in DAYS
+                ]
             )
 
-        # =====================================
-        # TAB 3 FIXED SHIFTS
-        # =====================================
+        # ------------------------------------
+        # FIXED SHIFTS
+        # ------------------------------------
 
         with tabs[2]:
 
@@ -344,14 +348,10 @@ def employee_form(row_data=None, index=None):
 
             if not fixed_enabled:
                 st.info(
-                    "Enable Fixed Shifts above to use this section."
+                    "Enable Fixed Shifts above first."
                 )
 
             else:
-
-                st.caption(
-                    "Weekly repeating shifts that auto-assign."
-                )
 
                 for day in DAYS:
 
@@ -361,6 +361,7 @@ def employee_form(row_data=None, index=None):
                     de = time(17, 0)
 
                     if has_saved:
+
                         try:
                             s = fixed_map[day][0]
                             e = fixed_map[day][1]
@@ -374,12 +375,13 @@ def employee_form(row_data=None, index=None):
                                 int(e[:2]),
                                 int(e[3:5])
                             )
+
                         except:
                             pass
 
                     st.markdown(f"**{day}**")
 
-                    a, b, c = st.columns([1.2, 1, 1])
+                    a, b, c = st.columns([1.1, 1, 1])
 
                     with a:
                         enabled = st.checkbox(
@@ -403,15 +405,12 @@ def employee_form(row_data=None, index=None):
                         )
 
                     if enabled:
+
                         fixed_rows.append(
                             f"{day}|"
                             f"{start_t.strftime('%H:%M')}|"
                             f"{end_t.strftime('%H:%M')}"
                         )
-
-        # =====================================
-        # SAVE BUTTON
-        # =====================================
 
         submitted = st.form_submit_button(
             "💾 Save Changes",
@@ -432,6 +431,7 @@ def employee_form(row_data=None, index=None):
             df = load_data()
 
             if not is_edit:
+
                 if str(emp_id) in df["ID"].astype(str).tolist():
                     st.error("Staff ID already exists.")
                     st.stop()
@@ -451,13 +451,17 @@ def employee_form(row_data=None, index=None):
                 "Fixed Shift Enabled":
                     "Yes" if fixed_enabled else "No",
                 "Fixed Weekly Shift":
-                    ";".join(fixed_rows) if fixed_enabled else ""
+                    ";".join(fixed_rows)
+                    if fixed_enabled else ""
             }
 
             if is_edit:
+
                 for k, v in new_row.items():
                     df.at[index, k] = v
+
             else:
+
                 df = pd.concat(
                     [df, pd.DataFrame([new_row])],
                     ignore_index=True
@@ -465,9 +469,8 @@ def employee_form(row_data=None, index=None):
 
             save_data(df)
 
-            st.toast("Saved successfully")
+            st.success("Saved successfully.")
             st.rerun()
-
 
 # ======================================================
 # PAGE
@@ -479,17 +482,13 @@ st.markdown(
 )
 
 st.markdown(
-    "<div class='page-sub'>Manage your staff roster, roles and weekly patterns</div>",
+    "<div class='page-sub'>Manage staff and contracts</div>",
     unsafe_allow_html=True
 )
 
 df = load_data()
 
-# -----------------------------------
-# CONTROLS
-# -----------------------------------
-
-c1, c2, c3 = st.columns([1.3, 2.2, 1.5])
+c1, c2, c3 = st.columns([1.2, 2.2, 1.5])
 
 with c1:
     if st.button(
@@ -511,13 +510,10 @@ with c3:
         ["All"] + ROLE_ORDER
     )
 
-# -----------------------------------
-# FILTERING
-# -----------------------------------
-
 df_show = df.copy()
 
 if search:
+
     s = search.lower()
 
     df_show = df_show[
@@ -531,44 +527,15 @@ if search:
     ]
 
 if role_filter != "All":
+
     df_show = df_show[
         df_show["Designation"] == role_filter
     ]
 
-# -----------------------------------
-# METRICS
-# -----------------------------------
-
-m1, m2, m3 = st.columns(3)
-
-m1.metric("Total Staff", len(df))
-
-m2.metric(
-    "Opening Trained",
-    len(df[
-        df["Opening Trained"]
-        .astype(str)
-        .str.lower()
-        .isin(["yes", "true", "1"])
-    ])
-)
-
-m3.metric(
-    "Fixed Shift Staff",
-    len(df[
-        df["Fixed Shift Enabled"]
-        .astype(str)
-        .eq("Yes")
-    ])
-)
-
 st.divider()
 
-# -----------------------------------
-# TABLE
-# -----------------------------------
-
 if df_show.empty:
+
     st.info("No employees found.")
 
 else:
@@ -593,47 +560,44 @@ else:
                 [2.1, 1.4, 1.2, 2.7, 0.6]
             )
 
-            with a:
-                st.markdown(
-                    f"**{row['Name']}**  \n"
-                    f"ID: {row['ID']}"
+            a.markdown(
+                f"**{row['Name']}**  \nID: {row['ID']}"
+            )
+
+            b.markdown(
+                f"""
+                <span class='role-badge'
+                style='background:{clr["bg"]};
+                color:{clr["text"]};
+                border:1px solid {clr["border"]}'>
+                {role}
+                </span>
+                """,
+                unsafe_allow_html=True
+            )
+
+            c.write(
+                f"{row['Minimum Contractual Hours']} - "
+                f"{row['Max Weekly Hours']}h"
+            )
+
+            if str(
+                row["Fixed Shift Enabled"]
+            ) == "Yes":
+
+                d.caption(
+                    row["Fixed Weekly Shift"]
                 )
 
-            with b:
-                st.markdown(
-                    f"""
-                    <span class='role-badge'
-                    style='background:{clr["bg"]};
-                    color:{clr["text"]};
-                    border:1px solid {clr["border"]}'>
-                    {role}
-                    </span>
-                    """,
-                    unsafe_allow_html=True
-                )
+            else:
 
-            with c:
-                st.write(
-                    f"{row['Minimum Contractual Hours']} - "
-                    f"{row['Max Weekly Hours']}h"
-                )
+                d.caption("No fixed shifts")
 
-            with d:
-                if str(
-                    row["Fixed Shift Enabled"]
-                ) == "Yes":
-                    st.caption(
-                        row["Fixed Weekly Shift"]
-                    )
-                else:
-                    st.caption("No fixed shifts")
-
-            with e:
-                if st.button(
-                    "✏️",
-                    key=f"edit_{idx}"
-                ):
-                    employee_form(row, idx)
+            if e.button(
+                "✏️",
+                key=f"edit_{idx}"
+            ):
+                employee_form(row, idx)
 
 st.divider()
 
