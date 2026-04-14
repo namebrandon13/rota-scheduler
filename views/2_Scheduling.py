@@ -83,10 +83,6 @@ def get_week_start(d):
         d = d.date()
     return d - timedelta(days=d.weekday())
 
-def get_week_start(d):
-    if isinstance(d, datetime):
-        d = d.date()
-    return d - timedelta(days=d.weekday())
 
 
 @st.cache_data(ttl=10)
@@ -122,12 +118,6 @@ def load_all():
 
 
 @st.cache_data(ttl=10)
-def get_week_start(d):
-
-    if hasattr(d, "date"):
-        d = d.date()
-
-    return d - timedelta(days=d.weekday())
 
 
 def save_all(df):
@@ -180,6 +170,18 @@ def week_label(ws):
 # ======================================================
 # SIDEBAR
 # ======================================================
+
+def get_sched_weeks():
+
+    df = load_all()
+
+    if df.empty:
+        return set()
+
+    return {
+        get_week_start(d)
+        for d in df["Date"]
+    }
 
 def render_sidebar():
 
