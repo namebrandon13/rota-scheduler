@@ -806,53 +806,39 @@ def show_day():
 
             role = person["Role"]
             clr = ROLE_COLORS.get(role, DEFAULT_ROLE)
-
             shift = person["Shift"]
-
+        
             try:
                 a, b = shift.split(" - ")
-
                 sh = int(a.split(":")[0])
                 eh = int(b.split(":")[0])
-
                 if eh == 0:
                     eh = 24
-
+        
                 left = (sh / 24) * 100
                 width = ((eh - sh) / 24) * 100
-
+        
             except:
                 left = 0
                 width = 0
-
-            st.markdown(
-                f"""
-                <div class='staff-card'>
-
-                    <div style='display:flex;justify-content:space-between'>
-                        <div>
-                            <b>{person["Name"]}</b>
-                            <span class='role-pill'
-                            style='background:{clr["bg"]};color:{clr["text"]};margin-left:8px'>
-                            {role}
-                            </span>
-                        </div>
-
-                        <div style='font-weight:700'>
-                            {shift}
-                        </div>
-                    </div>
-
-                    <div style='margin-top:10px' class='timeline'>
-                        <div class='timeline-bar'
-                        style='left:{left}%;width:{width}%;background:{clr["bar"]}'>
-                        </div>
-                    </div>
-
-                </div>
-                """,
-                unsafe_allow_html=True
-            )
+        
+            with st.container(border=True):
+        
+                c1, c2 = st.columns([3,1])
+        
+                with c1:
+                    st.markdown(
+                        f"**{person['Name']}**  \n"
+                        f"<span style='color:{clr['text']}'>{role}</span>",
+                        unsafe_allow_html=True
+                    )
+        
+                with c2:
+                    st.markdown(
+                        f"**{shift}**"
+                    )
+        
+                st.progress(width / 100)
 
     # =================================================
     # OFF STAFF
@@ -867,35 +853,21 @@ def show_day():
         for person in off_staff:
 
             role = person["Role"]
-            clr = ROLE_COLORS.get(role, DEFAULT_ROLE)
-
             label = person["Shift"]
-
-            if label == "HOLIDAY":
-                badge = "🏖 Holiday"
-            else:
-                badge = "❌ Off"
-
-            st.markdown(
-                f"""
-                <div class='staff-card'>
-                    <div style='display:flex;justify-content:space-between'>
-                        <div>
-                            <b>{person["Name"]}</b>
-                            <span class='role-pill'
-                            style='background:{clr["bg"]};color:{clr["text"]};margin-left:8px'>
-                            {role}
-                            </span>
-                        </div>
-
-                        <div style='font-weight:700;color:#6B7280'>
-                            {badge}
-                        </div>
-                    </div>
-                </div>
-                """,
-                unsafe_allow_html=True
-            )
+        
+            badge = "🏖 Holiday" if label == "HOLIDAY" else "❌ Off"
+        
+            with st.container(border=True):
+        
+                c1, c2 = st.columns([3,1])
+        
+                with c1:
+                    st.markdown(
+                        f"**{person['Name']}**  \n{role}"
+                    )
+        
+                with c2:
+                    st.markdown(f"**{badge}**")
 
 # =====================================================
 # MAIN ROUTER
