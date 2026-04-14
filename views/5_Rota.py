@@ -488,7 +488,7 @@ def show_calendar():
 
             st.rerun()
 
-    st.write("")
+    st.markdown("", unsafe_allow_html=True)
 
     headers = st.columns(7)
 
@@ -506,7 +506,7 @@ def show_calendar():
             with cols[i]:
 
                 if day_num == 0:
-                    st.write("")
+                    st.markdown("", unsafe_allow_html=True)
                     continue
 
                 curr = date(yr, mo, day_num)
@@ -598,7 +598,7 @@ def show_week():
                 week_start=ws
             )
 
-    st.write("")
+    st.markdown("", unsafe_allow_html=True)
 
     # Metrics
 
@@ -744,7 +744,7 @@ def show_day():
                     week_start=ws
                 )
 
-    st.write("")
+    st.markdown("", unsafe_allow_html=True)
 
     # =================================================
     # DAY DATA
