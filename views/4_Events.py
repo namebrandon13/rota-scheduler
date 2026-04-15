@@ -16,12 +16,6 @@ EVENTS_FILE = os.path.join(BASE_DIR, "EventsData.xlsx")
 EVENT_SCRIPT = os.path.join(BASE_DIR, "eventapicall.py")
 
 # ======================================================
-# PAGE CONFIG
-# ======================================================
-
-st.set_page_config(page_title="Events", layout="wide")
-
-# ======================================================
 # HELPERS
 # ======================================================
 
@@ -44,16 +38,12 @@ def impact_label(score):
 def load_data():
     if not os.path.exists(EVENTS_FILE):
         return pd.DataFrame()
-
     try:
         df = pd.read_excel(EVENTS_FILE)
         df.columns = df.columns.str.strip()
-
         if "Date" in df.columns:
             df["Date"] = pd.to_datetime(df["Date"])
-
         return df
-
     except:
         return pd.DataFrame()
 
@@ -62,15 +52,12 @@ def run_scan():
     try:
         if not os.path.exists(EVENT_SCRIPT):
             return False, "eventapicall.py not found"
-
         subprocess.run(
             [sys.executable, EVENT_SCRIPT],
             cwd=BASE_DIR,
             check=True
         )
-
         return True, "Scan complete"
-
     except Exception as e:
         return False, str(e)
 
@@ -81,8 +68,9 @@ def run_scan():
 
 st.markdown("""
 <style>
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&display=swap');
 html, body, [class*="css"] {
-    font-family: Inter, sans-serif;
+    font-family: 'Inter', sans-serif;
 }
 
 .page-title {
@@ -112,11 +100,44 @@ html, body, [class*="css"] {
     box-shadow: 0 2px 10px rgba(0,0,0,0.04);
 }
 
-.badge {
+.event-card-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    gap: 10px;
+}
+
+.event-card-title {
+    font-weight: 800;
+    color: #1E293B;
+    font-size: 1rem;
+}
+
+.event-badge {
     padding: 4px 10px;
     border-radius: 30px;
     font-size: 0.75rem;
     font-weight: 700;
+    color: white;
+    white-space: nowrap;
+}
+
+.event-date {
+    margin-top: 8px;
+    color: #6B7280;
+    font-size: 0.9rem;
+}
+
+.event-venue {
+    margin-top: 6px;
+    color: #374151;
+    font-size: 0.9rem;
+}
+
+.event-score {
+    margin-top: 8px;
+    font-weight: 600;
+    color: #1E293B;
 }
 
 .calendar-box {
@@ -170,7 +191,6 @@ with c1:
     if st.button("🔄 Run Live Scan", type="primary", use_container_width=True):
         with st.spinner("Scanning..."):
             ok, msg = run_scan()
-
         if ok:
             st.success(msg)
             st.rerun()
@@ -218,12 +238,7 @@ with fc1:
 
 with fc2:
     if "Impact Score" in df.columns:
-        score_range = st.slider(
-            "Impact Score",
-            0,
-            10,
-            (0, 10)
-        )
+        score_range = st.slider("Impact Score", 0, 10, (0, 10))
     else:
         score_range = (0, 10)
 
@@ -258,67 +273,52 @@ filtered = filtered.sort_values("Date")
 # TABS
 # ======================================================
 
-tab1, tab2, tab3 = st.tabs([
-    "🃏 Cards",
-    "📅 Calendar",
-    "🗺️ Map"
-])
+tab1, tab2, tab3 = st.tabs(["🃏 Cards", "📅 Calendar", "🗺️ Map"])
 
 # ======================================================
 # CARDS
 # ======================================================
 
 with tab1:
-
     if filtered.empty:
         st.info("No matching events.")
     else:
-
         cols = st.columns(3)
 
         for i, (_, row) in enumerate(filtered.iterrows()):
-
             score = int(row.get("Impact Score", 0))
             color = impact_color(score)
             label = impact_label(score)
+            event_name = str(row.get("Event Name", ""))
+            venue = str(row.get("Venue", ""))
+            event_date = row["Date"].strftime("%d %b %Y")
 
             with cols[i % 3]:
-
-                st.markdown(
-                    f"""
-                    <div class='event-card'>
-                        <div style='display:flex;justify-content:space-between;gap:10px'>
-                            <div style='font-weight:800'>
-                                {row.get("Event Name","")}
-                            </div>
-                            <div class='badge'
-                                 style='background:{color};color:white'>
-                                 {label}
-                            </div>
-                        </div>
-
-                        <div style='margin-top:8px;color:#6B7280'>
-                            📅 {row["Date"].strftime("%d %b %Y")}
-                        </div>
-
-                        <div style='margin-top:6px'>
-                            📍 {row.get("Venue","")}
-                        </div>
-
-                        <div style='margin-top:8px'>
-                            ⚡ {score}/10
-                        </div>
-                    </div>
-                    """,
-                    unsafe_allow_html=True
-                )
+                # Use st.container with border for reliable rendering
+                with st.container(border=True):
+                    # Header row with title and badge
+                    hc1, hc2 = st.columns([3, 1])
+                    with hc1:
+                        st.markdown(f"**{event_name}**")
+                    with hc2:
+                        st.markdown(
+                            f"<span style='background:{color};color:white;padding:4px 8px;"
+                            f"border-radius:20px;font-size:0.72em;font-weight:700'>{label}</span>",
+                            unsafe_allow_html=True
+                        )
+                    
+                    # Event details
+                    st.caption(f"📅 {event_date}")
+                    st.caption(f"📍 {venue}")
+                    
+                    # Score bar
+                    st.progress(score / 10, text=f"Impact: {score}/10")
 
 # ======================================================
 # CALENDAR
 # ======================================================
 
 with tab2:
-
     yr = st.session_state.ev_year
     mo = st.session_state.ev_month
 
@@ -334,9 +334,7 @@ with tab2:
             st.rerun()
 
     with n2:
-        st.markdown(
-            f"### {datetime(yr, mo, 1).strftime('%B %Y')}"
-        )
+        st.markdown(f"### {datetime(yr, mo, 1).strftime('%B %Y')}")
 
     with n3:
         if st.button("▶", key="next_month"):
@@ -348,26 +346,19 @@ with tab2:
             st.rerun()
 
     headers = st.columns(7)
-
-    for i, day_name in enumerate(
-        ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
-    ):
+    for i, day_name in enumerate(["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]):
         headers[i].markdown(f"**{day_name}**")
 
     event_map = {}
-
     for _, row in filtered.iterrows():
         d = row["Date"].date()
         event_map.setdefault(d, []).append(row)
 
     for week in calendar.monthcalendar(yr, mo):
-
         cols = st.columns(7)
 
         for i, day_num in enumerate(week):
-
             with cols[i]:
-
                 if day_num == 0:
                     st.write("")
                     continue
@@ -376,29 +367,18 @@ with tab2:
                 day_events = event_map.get(curr, [])
 
                 if day_events:
-                    score = max(
-                        int(x.get("Impact Score", 0))
-                        for x in day_events
-                    )
+                    score = max(int(x.get("Impact Score", 0)) for x in day_events)
                     bg = impact_color(score) + "22"
                 else:
                     bg = "#FFFFFF"
 
-                txt = "<br>".join(
-                    [
-                        str(x["Event Name"])[:16]
-                        for x in day_events[:2]
-                    ]
-                )
+                txt = "<br>".join([str(x["Event Name"])[:16] for x in day_events[:2]])
 
                 st.markdown(
                     f"""
-                    <div class='calendar-box'
-                         style='background:{bg}'>
+                    <div class='calendar-box' style='background:{bg}'>
                         <div class='day-number'>{day_num}</div>
-                        <div style='font-size:0.75rem'>
-                            {txt}
-                        </div>
+                        <div style='font-size:0.75rem'>{txt}</div>
                     </div>
                     """,
                     unsafe_allow_html=True
@@ -409,23 +389,14 @@ with tab2:
 # ======================================================
 
 with tab3:
-
-    if (
-        "Lat" not in filtered.columns or
-        "Lon" not in filtered.columns
-    ):
+    if "Lat" not in filtered.columns or "Lon" not in filtered.columns:
         st.warning("No map coordinates available.")
-
     else:
-
-        map_df = filtered.dropna(
-            subset=["Lat", "Lon"]
-        )
+        map_df = filtered.dropna(subset=["Lat", "Lon"])
 
         if map_df.empty:
             st.warning("No map data.")
         else:
-
             layer = pdk.Layer(
                 "ScatterplotLayer",
                 data=map_df,
@@ -444,12 +415,7 @@ with tab3:
             deck = pdk.Deck(
                 layers=[layer],
                 initial_view_state=view_state,
-                tooltip={
-                    "text": "{Event Name}\n{Venue}"
-                }
+                tooltip={"text": "{Event Name}\n{Venue}"}
             )
 
-            st.pydeck_chart(
-                deck,
-                use_container_width=True
-            )
+            st.pydeck_chart(deck, use_container_width=True)
