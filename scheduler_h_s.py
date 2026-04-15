@@ -456,9 +456,11 @@ def solve_rota_final_v14(emp_file, holiday_file, target_weeks=None):
                         model.Add(work[(idx, date_str, h)] == 0)
 
         # C. WEEKLY CONTRACT (CAPACITY)
+        print(f"  > Employee Hour Constraints:")
         for idx in emp_indices:
             emp = employees[idx]
             emp_id = emp['ID']
+            emp_name = emp['Name']
             
             available_days_count = 0
             for d in dates_in_order:
@@ -483,6 +485,8 @@ def solve_rota_final_v14(emp_file, holiday_file, target_weeks=None):
 
             adjusted_min = min(original_min, max_physical_capacity)
             original_max = int(emp.get('Max Weekly Hours', 40))
+            
+            print(f"    - {emp_name}: Min={adjusted_min}h, Max={original_max}h (available {available_days_count} days)")
 
             total_hours_vars = [
                 work[(idx, row['Date'].strftime('%Y-%m-%d'), h)] 
@@ -564,6 +568,7 @@ def solve_rota_final_v14(emp_file, holiday_file, target_weeks=None):
                 ).OnlyEnforceIf([is_working_day[(idx, today)], is_working_day[(idx, tomorrow)]])
 
         # E. STAFFING LOGIC (Hybrid + Event-Aware)
+        print(f"  > Daily Staffing Constraints:")
         for i, row in week_data.iterrows():
             date_str = row['Date'].strftime('%Y-%m-%d')
             day_name = row['Date'].day_name()
@@ -597,8 +602,18 @@ def solve_rota_final_v14(emp_file, holiday_file, target_weeks=None):
             min_closing = int(row['Minimum closing staff'])
             min_headcount = max(final_min_headcount, min_closing)
             
+            # Maximum Employees is a HARD CEILING - never exceed it
             manual_max = int(row['Maximum Employees'])
-            max_headcount = max(manual_max, min_headcount) 
+            
+            # Check for constraint conflict
+            if min_headcount > manual_max:
+                print(f"    ⚠️ WARNING {date_str}: Min staff ({min_headcount}) > Max employees ({manual_max})!")
+                print(f"       → Adjusting min to match max ({manual_max})")
+                min_headcount = manual_max
+            
+            max_headcount = manual_max  # Always use the manager's maximum
+            
+            print(f"    - {date_str} ({day_name[:3]}): Staff {min_headcount}-{max_headcount}, Closing≥{min_closing}") 
 
             # Apply basic staffing
             model.Add(sum(is_working_day[(idx, date_str)] for idx in emp_indices) >= min_headcount)
