@@ -568,28 +568,41 @@ def show_add_view():
                     if map_df.empty:
                         st.warning("No map data for filtered events.")
                     else:
-                        def get_color(score):
+                        # Create a clean DataFrame for pydeck with only needed columns
+                        map_data = []
+                        for _, row in map_df.iterrows():
+                            score = int(row.get('Impact Score', 0))
                             if score >= 8:
-                                return [220, 38, 38, 200]
+                                color = [220, 38, 38, 200]
                             elif score >= 5:
-                                return [217, 119, 6, 200]
-                            return [22, 163, 74, 200]
-                        
-                        map_df = map_df.copy()
-                        map_df['color'] = map_df['Impact Score'].apply(get_color)
+                                color = [217, 119, 6, 200]
+                            else:
+                                color = [22, 163, 74, 200]
+                            
+                            map_data.append({
+                                'lat': float(row['Lat']),
+                                'lon': float(row['Lon']),
+                                'name': str(row.get('Event Name', 'Unknown')),
+                                'venue': str(row.get('Venue', '')),
+                                'score': score,
+                                'color': color
+                            })
                         
                         layer = pdk.Layer(
                             "ScatterplotLayer",
-                            data=map_df,
-                            get_position='[Lon, Lat]',
+                            data=map_data,
+                            get_position='[lon, lat]',
                             get_radius=150,
                             get_fill_color='color',
                             pickable=True
                         )
                         
+                        avg_lat = sum(d['lat'] for d in map_data) / len(map_data)
+                        avg_lon = sum(d['lon'] for d in map_data) / len(map_data)
+                        
                         view_state = pdk.ViewState(
-                            latitude=map_df["Lat"].mean(),
-                            longitude=map_df["Lon"].mean(),
+                            latitude=avg_lat,
+                            longitude=avg_lon,
                             zoom=13
                         )
                         
@@ -597,7 +610,7 @@ def show_add_view():
                             layers=[layer],
                             initial_view_state=view_state,
                             tooltip={
-                                "html": "<b>{Event Name}</b><br>📍 {Venue}<br>⚡ Impact: {Impact Score}/10",
+                                "html": "<b>{name}</b><br>📍 {venue}<br>⚡ Impact: {score}/10",
                                 "style": {"backgroundColor": "#1E293B", "color": "white"}
                             }
                         )
