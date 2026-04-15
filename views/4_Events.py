@@ -1,10 +1,8 @@
 import streamlit as st
 import pandas as pd
 import os
-import subprocess
-import sys
 import calendar
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 import pydeck as pdk
 
 # ======================================================
@@ -13,7 +11,15 @@ import pydeck as pdk
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 EVENTS_FILE = os.path.join(BASE_DIR, "EventsData.xlsx")
-EVENT_SCRIPT = os.path.join(BASE_DIR, "eventapicall.py")
+
+# ======================================================
+# IMPORT EVENT SCANNER
+# ======================================================
+
+try:
+    from eventapicall import scan_live
+except:
+    scan_live = None
 
 # ======================================================
 # HELPERS
@@ -48,20 +54,6 @@ def load_data():
         return pd.DataFrame()
 
 
-def run_scan():
-    try:
-        if not os.path.exists(EVENT_SCRIPT):
-            return False, "eventapicall.py not found"
-        subprocess.run(
-            [sys.executable, EVENT_SCRIPT],
-            cwd=BASE_DIR,
-            check=True
-        )
-        return True, "Scan complete"
-    except Exception as e:
-        return False, str(e)
-
-
 # ======================================================
 # CSS
 # ======================================================
@@ -89,55 +81,6 @@ html, body, [class*="css"] {
     border: 1px solid #E5E7EB;
     border-radius: 14px;
     padding: 14px;
-}
-
-.event-card {
-    background: white;
-    border: 1px solid #E5E7EB;
-    border-radius: 16px;
-    padding: 16px;
-    margin-bottom: 14px;
-    box-shadow: 0 2px 10px rgba(0,0,0,0.04);
-}
-
-.event-card-header {
-    display: flex;
-    justify-content: space-between;
-    align-items: flex-start;
-    gap: 10px;
-}
-
-.event-card-title {
-    font-weight: 800;
-    color: #1E293B;
-    font-size: 1rem;
-}
-
-.event-badge {
-    padding: 4px 10px;
-    border-radius: 30px;
-    font-size: 0.75rem;
-    font-weight: 700;
-    color: white;
-    white-space: nowrap;
-}
-
-.event-date {
-    margin-top: 8px;
-    color: #6B7280;
-    font-size: 0.9rem;
-}
-
-.event-venue {
-    margin-top: 6px;
-    color: #374151;
-    font-size: 0.9rem;
-}
-
-.event-score {
-    margin-top: 8px;
-    font-weight: 600;
-    color: #1E293B;
 }
 
 .calendar-box {
@@ -185,24 +128,33 @@ st.markdown("<div class='page-sub'>Track local events that may affect staffing d
 # ACTIONS
 # ======================================================
 
-c1, c2 = st.columns([1.5, 5])
+c1, c2, c3 = st.columns([1.5, 1.5, 4])
 
 with c1:
     if st.button("🔄 Run Live Scan", type="primary", use_container_width=True):
-        with st.spinner("Scanning..."):
-            ok, msg = run_scan()
-        if ok:
-            st.success(msg)
-            st.rerun()
+        if scan_live:
+            with st.spinner("Scanning today + 30 days..."):
+                try:
+                    result = scan_live(30)  # Scan today + 30 days
+                    if result is not None and not result.empty:
+                        st.success(f"Found {len(result)} events!")
+                    else:
+                        st.info("No new events found.")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Scan error: {e}")
         else:
-            st.error(msg)
+            st.error("Event scanner not available.")
+
+with c2:
+    st.caption("Scans: Today → +30 days")
 
 # ======================================================
 # NO DATA
 # ======================================================
 
 if df.empty:
-    st.info("No event data available.")
+    st.info("No event data available. Click 'Run Live Scan' to fetch events.")
     st.stop()
 
 # ======================================================
@@ -234,7 +186,8 @@ st.subheader("🔍 Filters")
 fc1, fc2, fc3 = st.columns(3)
 
 with fc1:
-    show_past = st.checkbox("Show Past Events", value=True)
+    # DEFAULT: Hide past events (checkbox unchecked = show only future)
+    show_past = st.checkbox("Show Past Events", value=False)
 
 with fc2:
     if "Impact Score" in df.columns:
@@ -251,6 +204,7 @@ with fc3:
 
 filtered = df.copy()
 
+# DEFAULT: Only show today and future events
 if not show_past:
     filtered = filtered[filtered["Date"] >= today]
 
@@ -281,8 +235,14 @@ tab1, tab2, tab3 = st.tabs(["🃏 Cards", "📅 Calendar", "🗺️ Map"])
 
 with tab1:
     if filtered.empty:
-        st.info("No matching events.")
+        if not show_past:
+            st.info("No upcoming events. Enable 'Show Past Events' to see historical data.")
+        else:
+            st.info("No matching events.")
     else:
+        # Show count
+        st.caption(f"Showing {len(filtered)} event(s)")
+        
         cols = st.columns(3)
 
         for i, (_, row) in enumerate(filtered.iterrows()):
@@ -292,9 +252,9 @@ with tab1:
             event_name = str(row.get("Event Name", ""))
             venue = str(row.get("Venue", ""))
             event_date = row["Date"].strftime("%d %b %Y")
+            start_time = str(row.get("Start Time", ""))
 
             with cols[i % 3]:
-                # Use st.container with border for reliable rendering
                 with st.container(border=True):
                     # Header row with title and badge
                     hc1, hc2 = st.columns([3, 1])
@@ -308,7 +268,7 @@ with tab1:
                         )
                     
                     # Event details
-                    st.caption(f"📅 {event_date}")
+                    st.caption(f"📅 {event_date} · 🕐 {start_time}")
                     st.caption(f"📍 {venue}")
                     
                     # Score bar
@@ -349,6 +309,7 @@ with tab2:
     for i, day_name in enumerate(["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]):
         headers[i].markdown(f"**{day_name}**")
 
+    # Use filtered data for calendar (respects show_past checkbox)
     event_map = {}
     for _, row in filtered.iterrows():
         d = row["Date"].date()
@@ -395,27 +356,47 @@ with tab3:
         map_df = filtered.dropna(subset=["Lat", "Lon"])
 
         if map_df.empty:
-            st.warning("No map data.")
+            st.warning("No map data for filtered events.")
         else:
+            # Add color based on impact
+            def get_color(score):
+                if score >= 8:
+                    return [220, 38, 38, 200]  # Red
+                elif score >= 5:
+                    return [217, 119, 6, 200]  # Orange
+                return [22, 163, 74, 200]  # Green
+            
+            map_df = map_df.copy()
+            map_df['color'] = map_df['Impact Score'].apply(get_color)
+
             layer = pdk.Layer(
                 "ScatterplotLayer",
                 data=map_df,
                 get_position='[Lon, Lat]',
-                get_radius=180,
-                get_fill_color='[220, 38, 38, 180]',
+                get_radius=200,
+                get_fill_color='color',
                 pickable=True
             )
 
             view_state = pdk.ViewState(
                 latitude=map_df["Lat"].mean(),
                 longitude=map_df["Lon"].mean(),
-                zoom=11
+                zoom=12
             )
 
             deck = pdk.Deck(
                 layers=[layer],
                 initial_view_state=view_state,
-                tooltip={"text": "{Event Name}\n{Venue}"}
+                tooltip={
+                    "html": "<b>{Event Name}</b><br>📍 {Venue}<br>⚡ Impact: {Impact Score}/10",
+                    "style": {"backgroundColor": "#1E293B", "color": "white"}
+                }
             )
 
             st.pydeck_chart(deck, use_container_width=True)
+            
+            # Legend
+            st.markdown("""
+            **Map Legend:**
+            🔴 High Impact (8-10) · 🟠 Medium Impact (5-7) · 🟢 Low Impact (1-4)
+            """)
