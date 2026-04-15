@@ -518,6 +518,10 @@ def show_add_view():
                     if isinstance(d, date):
                         event_map.setdefault(d, []).append(ev)
                 
+                # Sort events by impact descending for each day
+                for d in event_map:
+                    event_map[d] = sorted(event_map[d], key=lambda x: x.get('Impact Score', 0), reverse=True)
+                
                 # Day headers
                 day_cols = st.columns(7)
                 for i, day_name in enumerate(["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]):
@@ -538,18 +542,19 @@ def show_add_view():
                             bg = "#FFFFFF"
                             border = "#E5E7EB"
                         
+                        # Show ALL events, sorted by impact (highest first)
                         event_names = "<br>".join([
-                            f"<span style='font-size:0.7em'>• {str(x.get('Event Name', ''))[:18]}</span>"
-                            for x in day_events[:3]
+                            f"<span style='font-size:0.7em;color:{impact_color(int(x.get('Impact Score', 0)))}'>● {str(x.get('Event Name', ''))[:20]}</span>"
+                            for x in day_events
                         ])
                         
-                        if len(day_events) > 3:
-                            event_names += f"<br><span style='font-size:0.65em;color:#6B7280'>+{len(day_events)-3} more</span>"
+                        # Calculate min-height based on number of events
+                        min_height = max(100, 60 + len(day_events) * 18)
                         
                         st.markdown(
                             f"""
                             <div style='border:2px solid {border};border-radius:10px;padding:8px;
-                                min-height:100px;background:{bg};text-align:center'>
+                                min-height:{min_height}px;background:{bg};text-align:center'>
                                 <div style='font-size:1.4rem;font-weight:800;color:#1E293B'>{day_date.day}</div>
                                 <div style='font-size:0.75em;color:#64748B;margin-bottom:4px'>{day_date.strftime('%b')}</div>
                                 {event_names if day_events else "<span style='color:#CBD5E1;font-size:0.8em'>No events</span>"}
