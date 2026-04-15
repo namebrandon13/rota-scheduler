@@ -204,7 +204,15 @@ def show_list_view():
         role_filter = st.selectbox("Role", roles, label_visibility="collapsed")
     
     with fc3:
-        sort_by = st.selectbox("Sort by", ['Name', 'ID', 'Max Weekly Hours'], label_visibility="collapsed")
+        sort_by = st.selectbox("Sort by", ['Seniority', 'Name', 'ID', 'Max Weekly Hours'], label_visibility="collapsed")
+    
+    # Seniority order (highest to lowest)
+    SENIORITY_ORDER = {
+        'Manager': 1,
+        'Shift Leader': 2,
+        'Team Leader': 3,
+        'Associate': 4
+    }
     
     # Filter data
     filtered = df.copy()
@@ -215,12 +223,20 @@ def show_list_view():
     if role_filter != 'All':
         filtered = filtered[filtered['Designation'] == role_filter]
     
-    if sort_by == 'Name':
+    # Add seniority rank for sorting
+    filtered['_seniority'] = filtered['Designation'].map(lambda x: SENIORITY_ORDER.get(x, 99))
+    
+    if sort_by == 'Seniority':
+        filtered = filtered.sort_values(['_seniority', 'Name'])
+    elif sort_by == 'Name':
         filtered = filtered.sort_values('Name')
     elif sort_by == 'ID':
         filtered = filtered.sort_values('ID')
     elif sort_by == 'Max Weekly Hours':
         filtered = filtered.sort_values('Max Weekly Hours', ascending=False)
+    
+    # Remove helper column
+    filtered = filtered.drop(columns=['_seniority'])
     
     st.caption(f"Showing {len(filtered)} employee(s)")
     
