@@ -12,7 +12,10 @@ def get_gspread_client():
     ]
     # Convert Streamlit secrets to a standard dictionary
     creds_dict = dict(st.secrets["gcp_service_account"])
-    creds = ServiceAccountCredentials.from_service_account_info(creds_dict, scope)
+    
+    # FIX: Use from_json_keyfile_dict instead of from_service_account_info
+    creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
+    
     return gspread.authorize(creds)
 
 def get_sheet_data(sheet_id, tab_name):
