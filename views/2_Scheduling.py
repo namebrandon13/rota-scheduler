@@ -12,11 +12,13 @@ from gsheets_db import get_user_data, write_user_data
 # AUTH & SETUP
 # ======================================================
 
-if 'sheet_id' not in st.session_state:
+# Verify user is logged in and has a sheet ID AND username assigned
+if 'sheet_id' not in st.session_state or 'username' not in st.session_state:
     st.error("Please log in to access the Scheduling Management.")
     st.stop()
 
 sheet_id = st.session_state['sheet_id']
+username = st.session_state['username']
 SHEET_TEMPLATE = "Shift Template"
 SHEET_EVENTS = "Events"
 
@@ -125,9 +127,10 @@ def get_week_start(d):
     return d - timedelta(days=d.weekday())
 
 @st.cache_data(ttl=10)
-def load_all():
+def load_all(user):
     try:
-        df = get_sheet_data(sheet_id, SHEET_TEMPLATE)
+        # Fetch only this user's templates
+        df = get_user_data(sheet_id, SHEET_TEMPLATE, user)
         if df.empty:
             return pd.DataFrame()
             
@@ -143,9 +146,10 @@ def load_all():
         st.error(f"Error loading schedule: {e}")
         return pd.DataFrame()
 
-def load_events_for_week(ws):
+def load_events_for_week(ws, user):
     try:
-        df = get_sheet_data(sheet_id, SHEET_EVENTS)
+        # Fetch only this user's events
+        df = get_user_data(sheet_id, SHEET_EVENTS, user)
         if df.empty:
             return pd.DataFrame()
             
@@ -157,7 +161,7 @@ def load_events_for_week(ws):
         st.error(f"Error loading events: {e}")
         return pd.DataFrame()
 
-def save_all(df):
+def save_all(df, user):
     try:
         # CRITICAL REPAIR: Drop any duplicated days so the database stays perfectly clean
         df['Date'] = pd.to_datetime(df['Date'])
@@ -170,7 +174,8 @@ def save_all(df):
             if col in df_upload.columns:
                 df_upload[col] = df_upload[col].apply(lambda x: x.strftime('%H:%M:%S') if pd.notna(x) else '')
                 
-        write_sheet_data(sheet_id, SHEET_TEMPLATE, df_upload)
+        # Save only to this user's partition
+        write_user_data(sheet_id, SHEET_TEMPLATE, user, df_upload)
         st.cache_data.clear()
     except Exception as e:
         st.error(f"Error saving to Google Sheets: {e}")
@@ -203,13 +208,13 @@ def impact_label(score):
 # SIDEBAR
 # ======================================================
 
-def get_sched_weeks():
-    df = load_all()
+def get_sched_weeks(user):
+    df = load_all(user)
     if df.empty: return set()
     return {get_week_start(d) for d in df["Date"]}
 
 def render_sidebar():
-    sw = get_sched_weeks()
+    sw = get_sched_weeks(username)
     with st.sidebar:
         st.markdown("### 📊 Scheduling")
         st.metric("Weeks Configured", len(sw))
@@ -221,7 +226,7 @@ render_sidebar()
 # ======================================================
 
 def show_calendar():
-    sw = get_sched_weeks()
+    sw = get_sched_weeks(username)
     st.markdown("<div class='page-title'>📅 Scheduling</div>", unsafe_allow_html=True)
     st.markdown("<div class='page-sub'>Manage weekly templates</div>", unsafe_allow_html=True)
 
@@ -287,7 +292,7 @@ def show_week_view():
         nav_to("calendar")
         return
 
-    df_all = load_all()
+    df_all = load_all(username)
     if df_all.empty:
         st.warning("No data found.")
         return
@@ -318,7 +323,7 @@ def show_week_view():
             edited["Budget"] = new_budget
             others = df_all[df_all["_ws_str"] != ws_str].drop(columns=["_ws_str"])
             final = pd.concat([others, edited], ignore_index=True)
-            save_all(final)
+            save_all(final, username)
             st.success("Saved.")
             st.rerun()
 
@@ -364,7 +369,7 @@ def show_add_view():
                         st.session_state.week_events = pd.DataFrame()
                         st.session_state.events_scanned = True
                 else:
-                    st.session_state.week_events = load_events_for_week(ws)
+                    st.session_state.week_events = load_events_for_week(ws, username)
                     st.session_state.events_scanned = True
                 st.rerun()
         
@@ -549,14 +554,14 @@ def show_add_view():
     with col1:
         if st.button("💾 Save New Week", type="primary", use_container_width=True):
             edited["Budget"] = budget
-            df_all = load_all()
+            df_all = load_all(username)
 
             if df_all.empty:
                 final = edited
             else:
                 final = pd.concat([df_all, edited], ignore_index=True)
 
-            save_all(final)
+            save_all(final, username)
             st.success("Week saved!")
             nav_to("calendar")
     
