@@ -7,14 +7,22 @@ from reportlab.lib.pagesizes import landscape, letter
 from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph
 from reportlab.lib.styles import getSampleStyleSheet
 
+# Import your new database handler
+from gsheets_db import get_sheet_data, write_sheet_data, get_gspread_client
+
 # ======================================================
-# PATHS (CLOUD SAFE - relative to script location)
+# AUTH & SETUP
 # ======================================================
-current_dir   = os.path.dirname(os.path.abspath(__file__))
-parent_dir    = os.path.dirname(current_dir)
-EMPLOYEE_FILE = os.path.join(parent_dir, 'Book(Employees)_01.xlsx')
-HOLIDAY_FILE  = os.path.join(parent_dir, 'Holidaydata.xlsx')
-OUTPUT_FILE   = os.path.join(parent_dir, 'Final_Rota_MultiSheet.xlsx')
+
+# Verify user is logged in and has a sheet ID assigned
+if 'sheet_id' not in st.session_state:
+    st.error("Please log in to access the Rota Dashboard.")
+    st.stop()
+
+sheet_id = st.session_state['sheet_id']
+
+SHEET_EMPLOYEES = "Employees"
+SHEET_TEMPLATES = "Shift Templates"
 
 # ======================================================
 # ROLE COLORS
@@ -93,11 +101,20 @@ def get_week_start(d):
     if isinstance(d, datetime): d = d.date()
     return d - timedelta(days=d.weekday())
 
+def get_all_sheet_names():
+    try:
+        client = get_gspread_client()
+        sh = client.open_by_key(sheet_id)
+        return [ws.title for ws in sh.worksheets()]
+    except Exception as e:
+        st.error(f"Error fetching sheets: {e}")
+        return []
+
 @st.cache_data(ttl=30)
 def get_scheduling_weeks():
-    if not os.path.exists(EMPLOYEE_FILE): return set()
     try:
-        df = pd.read_excel(EMPLOYEE_FILE, sheet_name="Shift Templates")
+        df = get_sheet_data(sheet_id, SHEET_TEMPLATES)
+        if df.empty: return set()
         df['Date'] = pd.to_datetime(df['Date'])
         return {(d - timedelta(days=d.weekday())).date() for d in df['Date']}
     except: return set()
@@ -105,43 +122,42 @@ def get_scheduling_weeks():
 @st.cache_data(ttl=10)
 def get_generated_weeks():
     r = {}
-    if not os.path.exists(OUTPUT_FILE): return r
-    try:
-        xls = pd.ExcelFile(OUTPUT_FILE)
-        for sheet in xls.sheet_names:
-            df = pd.read_excel(OUTPUT_FILE, sheet_name=sheet, nrows=1)
+    sheet_names = get_all_sheet_names()
+    for sheet in sheet_names:
+        # Optimization: Only process sheets that look like Rotas (e.g., "Week X")
+        if sheet in ["Employees", "Shift Templates", "Events", "Holidays", "Data"]: continue
+        if "Week" not in sheet: continue
+        
+        try:
+            df = get_sheet_data(sheet_id, sheet)
+            if df.empty: continue
+            
             dc = [c for c in df.columns if c not in ('Name','Employee ID','Total Weekly Hours')]
             if dc:
                 try:
                     d = datetime.strptime(dc[0].split(' ')[0], '%Y-%m-%d').date()
                     r[get_week_start(d)] = sheet
                 except: pass
-    except: pass
+        except: pass
     return r
 
 @st.cache_data(ttl=10)
 def get_week_total_hours():
     r = {}
-    if not os.path.exists(OUTPUT_FILE): return r
-    try:
-        xls = pd.ExcelFile(OUTPUT_FILE)
-        for sheet in xls.sheet_names:
-            df = pd.read_excel(OUTPUT_FILE, sheet_name=sheet)
-            if 'Total Weekly Hours' not in df.columns: continue
-            dc = [c for c in df.columns if c not in ('Name','Employee ID','Total Weekly Hours')]
-            if not dc: continue
-            try:
-                d = datetime.strptime(dc[0].split(' ')[0], '%Y-%m-%d').date()
-                r[get_week_start(d)] = int(df['Total Weekly Hours'].sum())
-            except: pass
-    except: pass
+    gen_weeks = get_generated_weeks()
+    for ws, sheet in gen_weeks.items():
+        try:
+            df = get_sheet_data(sheet_id, sheet)
+            if 'Total Weekly Hours' in df.columns:
+                r[ws] = int(pd.to_numeric(df['Total Weekly Hours'], errors='coerce').sum())
+        except: pass
     return r
 
 @st.cache_data(ttl=30)
 def get_schedule_budget(ws):
-    if not os.path.exists(EMPLOYEE_FILE): return None
     try:
-        df = pd.read_excel(EMPLOYEE_FILE, sheet_name="Shift Templates")
+        df = get_sheet_data(sheet_id, SHEET_TEMPLATES)
+        if df.empty: return None
         df.columns = df.columns.str.strip()
         df['Date'] = pd.to_datetime(df['Date'])
         df['_ws'] = df['Date'].apply(lambda x: (x.date() - timedelta(days=x.weekday())))
@@ -151,19 +167,19 @@ def get_schedule_budget(ws):
 
 @st.cache_data(ttl=60)
 def get_employee_roles():
-    if not os.path.exists(EMPLOYEE_FILE): return {}
     try:
-        df = pd.read_excel(EMPLOYEE_FILE, sheet_name="Employees")
+        df = get_sheet_data(sheet_id, SHEET_EMPLOYEES)
+        if df.empty: return {}
         df.columns = df.columns.str.strip()
         return {str(n).strip(): str(r).strip() for n, r in zip(df['Name'], df['Designation'])}
     except: return {}
 
 def load_week_rota(sn):
-    try: return pd.read_excel(OUTPUT_FILE, sheet_name=sn)
+    try: return get_sheet_data(sheet_id, sn)
     except: return None
 
 def calc_hours(s):
-    if not isinstance(s, str) or ' - ' not in s: return 0.0
+    if pd.isna(s) or not isinstance(s, str) or ' - ' not in s: return 0.0
     try:
         a, b = s.split(' - ')
         sh, sm = map(int, a.split(':'))
@@ -203,7 +219,7 @@ def create_pdf(df, wn):
 
 def clear_caches():
     for fn in [get_generated_weeks, get_week_total_hours,
-               get_scheduling_weeks, get_schedule_budget]:
+               get_scheduling_weeks, get_schedule_budget, get_employee_roles]:
         fn.clear()
 
 def nav_to(view, sel_date=None, week_start=None):
@@ -383,10 +399,11 @@ def _gen_panel(sw):
     with c2:
         st.write("")
         if st.button("🚀 Generate Rota", type="primary", use_container_width=True):
-            with st.spinner("⏳ Optimising…"):
+            with st.spinner("⏳ Optimising via Cloud…"):
                 try:
                     from scheduler_h_s import solve_rota_final_v14
-                    solve_rota_final_v14(EMPLOYEE_FILE, HOLIDAY_FILE, target_weeks=[ws])
+                    # Call updated scheduler which now accepts sheet_id instead of local files
+                    solve_rota_final_v14(sheet_id=sheet_id, target_weeks=[ws])
                     st.success("✅ Done!")
                     time.sleep(0.8)
                     nav_to('calendar')
@@ -416,7 +433,7 @@ def show_week_view():
             with st.spinner("Regenerating…"):
                 try:
                     from scheduler_h_s import solve_rota_final_v14
-                    solve_rota_final_v14(EMPLOYEE_FILE, HOLIDAY_FILE, target_weeks=[ws])
+                    solve_rota_final_v14(sheet_id=sheet_id, target_weeks=[ws])
                     if f"df_{sn}" in st.session_state:
                         del st.session_state[f"df_{sn}"]
                     st.success("Done!")
@@ -447,7 +464,7 @@ def show_week_view():
                 wk = int((df[ch] != 'OFF').sum() - df[ch].isna().sum())
                 ev = '[Event' in ch
                 tod = (d == date.today())
-                lb = (f"{'🎫 ' if ev else ''}**{d.strftime('%a')}**  \n{d.strftime('%d %b')}  \n👥 {wk}")
+                lb = (f"{'🎫 ' if ev else ''}**{d.strftime('%a')}** \n{d.strftime('%d %b')}  \n👥 {wk}")
                 bt = "primary" if tod else "secondary"
             except:
                 lb = ch[:8]
@@ -458,7 +475,7 @@ def show_week_view():
                     nav_to('day', sel_date=d, week_start=ws)
     
     st.write("")
-    th = df['Total Weekly Hours'].sum() if 'Total Weekly Hours' in df.columns else 0
+    th = pd.to_numeric(df['Total Weekly Hours'], errors='coerce').sum() if 'Total Weekly Hours' in df.columns else 0
     bgt = get_schedule_budget(ws) or 0
     
     m1, m2, m3, m4 = st.columns(4)
@@ -498,6 +515,8 @@ def show_week_view():
     if not ed.equals(st.session_state[sk]):
         ed = recalc(ed)
         st.session_state[sk] = ed
+        # Save edits straight back to the cloud
+        write_sheet_data(sheet_id, sn, ed)
         st.rerun()
     
     st.divider()
@@ -512,9 +531,13 @@ def show_week_view():
             pb = create_pdf(ed, sn)
             st.download_button("⬇️ PDF", pb, f"Rota_{sn.replace(' ','_')}.pdf", mime="application/pdf")
         with dc2c:
-            if os.path.exists(OUTPUT_FILE):
-                with open(OUTPUT_FILE, 'rb') as f:
-                    st.download_button("⬇️ Full Workbook", f.read(), "Final_Rota_Full.xlsx")
+            # Create a full workbook on the fly from all generated weeks
+            full_buf = io.BytesIO()
+            with pd.ExcelWriter(full_buf, engine='openpyxl') as writer:
+                for week_name in gw.values():
+                    sheet_df = get_sheet_data(sheet_id, week_name)
+                    sheet_df.to_excel(writer, index=False, sheet_name=week_name)
+            st.download_button("⬇️ Full Workbook", full_buf.getvalue(), "Final_Rota_Full.xlsx")
 
 # ======================================================
 # VIEW 3: DAY
