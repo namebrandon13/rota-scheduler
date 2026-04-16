@@ -8,18 +8,19 @@ from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph
 from reportlab.lib.styles import getSampleStyleSheet
 
 # Import your new database handler
-from gsheets_db import get_user_data, write_user_data
+from gsheets_db import get_user_data, write_user_data, get_gspread_client
 
 # ======================================================
 # AUTH & SETUP
 # ======================================================
 
-# Verify user is logged in and has a sheet ID assigned
-if 'sheet_id' not in st.session_state:
+# Verify user is logged in and has a sheet ID and username assigned
+if 'sheet_id' not in st.session_state or 'username' not in st.session_state:
     st.error("Please log in to access the Rota Dashboard.")
     st.stop()
 
 sheet_id = st.session_state['sheet_id']
+username = st.session_state['username']
 
 SHEET_EMPLOYEES = "Employees"
 SHEET_TEMPLATES = "Shift Template"
@@ -111,27 +112,24 @@ def get_all_sheet_names():
         return []
 
 @st.cache_data(ttl=30)
-def get_scheduling_weeks():
+def get_scheduling_weeks(user):
     try:
-        df = get_sheet_data(sheet_id, SHEET_TEMPLATES)
+        df = get_user_data(sheet_id, SHEET_TEMPLATES, user)
         if df.empty: return set()
         df['Date'] = pd.to_datetime(df['Date'])
         return {(d - timedelta(days=d.weekday())).date() for d in df['Date']}
     except: return set()
 
 @st.cache_data(ttl=10)
-def get_generated_weeks():
+def get_generated_weeks(user):
     r = {}
     sheet_names = get_all_sheet_names()
     for sheet in sheet_names:
-        # Optimization: Only process sheets that look like Rotas
-        if sheet in ["Employees", "Shift Templates", "Events", "Holidays", "Data"]: continue
-        
-        # --- FIXED BUG HERE ---
+        if sheet in ["Employees", "Shift Template", "Events", "Holiday", "Users"]: continue
         if "Rota_" not in sheet: continue 
         
         try:
-            df = get_sheet_data(sheet_id, sheet)
+            df = get_user_data(sheet_id, sheet, user)
             if df.empty: continue
             
             dc = [c for c in df.columns if c not in ('Name','Employee ID','Total Weekly Hours')]
@@ -144,21 +142,21 @@ def get_generated_weeks():
     return r
 
 @st.cache_data(ttl=10)
-def get_week_total_hours():
+def get_week_total_hours(user):
     r = {}
-    gen_weeks = get_generated_weeks()
+    gen_weeks = get_generated_weeks(user)
     for ws, sheet in gen_weeks.items():
         try:
-            df = get_sheet_data(sheet_id, sheet)
+            df = get_user_data(sheet_id, sheet, user)
             if 'Total Weekly Hours' in df.columns:
                 r[ws] = int(pd.to_numeric(df['Total Weekly Hours'], errors='coerce').sum())
         except: pass
     return r
 
 @st.cache_data(ttl=30)
-def get_schedule_budget(ws):
+def get_schedule_budget(ws, user):
     try:
-        df = get_sheet_data(sheet_id, SHEET_TEMPLATES)
+        df = get_user_data(sheet_id, SHEET_TEMPLATES, user)
         if df.empty: return None
         df.columns = df.columns.str.strip()
         df['Date'] = pd.to_datetime(df['Date'])
@@ -168,16 +166,16 @@ def get_schedule_budget(ws):
     except: return None
 
 @st.cache_data(ttl=60)
-def get_employee_roles():
+def get_employee_roles(user):
     try:
-        df = get_sheet_data(sheet_id, SHEET_EMPLOYEES)
+        df = get_user_data(sheet_id, SHEET_EMPLOYEES, user)
         if df.empty: return {}
         df.columns = df.columns.str.strip()
         return {str(n).strip(): str(r).strip() for n, r in zip(df['Name'], df['Designation'])}
     except: return {}
 
-def load_week_rota(sn):
-    try: return get_sheet_data(sheet_id, sn)
+def load_week_rota(sn, user):
+    try: return get_user_data(sheet_id, sn, user)
     except: return None
 
 def calc_hours(s):
@@ -237,9 +235,9 @@ def nav_to(view, sel_date=None, week_start=None):
 def render_sidebar():
     view = st.session_state.view
     ws = st.session_state.week_start
-    gen = get_generated_weeks()
-    sched = get_scheduling_weeks()
-    hrs_map = get_week_total_hours()
+    gen = get_generated_weeks(username)
+    sched = get_scheduling_weeks(username)
+    hrs_map = get_week_total_hours(username)
     
     with st.sidebar:
         st.markdown("---")
@@ -257,7 +255,7 @@ def render_sidebar():
                 f"<b style='color:#1D4ED8'>📅 {ws.strftime('%d %b')} – {we.strftime('%d %b')}</b></div>",
                 unsafe_allow_html=True)
             
-            budget = get_schedule_budget(ws)
+            budget = get_schedule_budget(ws, username)
             total_h = hrs_map.get(ws, 0)
             
             if budget:
@@ -271,7 +269,7 @@ def render_sidebar():
             
             sheet = gen.get(ws)
             if sheet:
-                df = load_week_rota(sheet)
+                df = load_week_rota(sheet, username)
                 if df is not None:
                     dc = [c for c in df.columns if c not in ('Name','Employee ID','Total Weekly Hours')]
                     st.markdown("**👥 Daily Staffing**")
@@ -299,9 +297,9 @@ render_sidebar()
 # VIEW 1: CALENDAR
 # ======================================================
 def show_calendar():
-    sw = get_scheduling_weeks()
-    gw = get_generated_weeks()
-    hm = get_week_total_hours()
+    sw = get_scheduling_weeks(username)
+    gw = get_generated_weeks(username)
+    hm = get_week_total_hours(username)
     
     st.markdown("<div class='page-title'>🚀 Rota Dashboard</div>", unsafe_allow_html=True)
     st.markdown("<div class='page-sub'>Click any day to view its rota or generate one</div>", unsafe_allow_html=True)
@@ -393,7 +391,7 @@ def _gen_panel(sw):
         st.warning("⚠️ No shift template for this week. Add one in the Scheduling page first.")
         return
     
-    budget = get_schedule_budget(ws)
+    budget = get_schedule_budget(ws, username)
     c1, c2 = st.columns([3, 1])
     c1.subheader(f"📅 {ws.strftime('%d %b')} – {we.strftime('%d %b %Y')}")
     c1.info(f"Shift template found{f' · Budget: **{budget}h**' if budget else ''}. Ready to generate.")
@@ -404,8 +402,7 @@ def _gen_panel(sw):
             with st.spinner("⏳ Optimising via Cloud…"):
                 try:
                     from scheduler_h_s import solve_rota_final_v14
-                    # Call updated scheduler which now accepts sheet_id instead of local files
-                    solve_rota_final_v14(sheet_id=sheet_id, target_weeks=[ws])
+                    solve_rota_final_v14(sheet_id=sheet_id, target_weeks=[ws], username=username)
                     st.success("✅ Done!")
                     time.sleep(0.8)
                     nav_to('calendar')
@@ -416,11 +413,11 @@ def _gen_panel(sw):
 # VIEW 2: WEEK
 # ======================================================
 def show_week_view():
-    gw = get_generated_weeks()
+    gw = get_generated_weeks(username)
     ws = st.session_state.week_start
     we = ws + timedelta(days=6)
     sn = gw.get(ws)
-    roles = get_employee_roles()
+    roles = get_employee_roles(username)
     
     c1, c2, c3 = st.columns([1.2, 6, 1.5])
     with c1:
@@ -435,7 +432,7 @@ def show_week_view():
             with st.spinner("Regenerating…"):
                 try:
                     from scheduler_h_s import solve_rota_final_v14
-                    solve_rota_final_v14(sheet_id=sheet_id, target_weeks=[ws])
+                    solve_rota_final_v14(sheet_id=sheet_id, target_weeks=[ws], username=username)
                     if f"df_{sn}" in st.session_state:
                         del st.session_state[f"df_{sn}"]
                     st.success("Done!")
@@ -450,7 +447,7 @@ def show_week_view():
         st.error("No rota found.")
         return
     
-    df = load_week_rota(sn)
+    df = load_week_rota(sn, username)
     if df is None:
         st.error("Could not load rota.")
         return
@@ -478,7 +475,7 @@ def show_week_view():
     
     st.write("")
     th = pd.to_numeric(df['Total Weekly Hours'], errors='coerce').sum() if 'Total Weekly Hours' in df.columns else 0
-    bgt = get_schedule_budget(ws) or 0
+    bgt = get_schedule_budget(ws, username) or 0
     
     m1, m2, m3, m4 = st.columns(4)
     m1.metric("⏱️ TOTAL HOURS", f"{th:.0f}h")
@@ -517,8 +514,7 @@ def show_week_view():
     if not ed.equals(st.session_state[sk]):
         ed = recalc(ed)
         st.session_state[sk] = ed
-        # Save edits straight back to the cloud
-        write_sheet_data(sheet_id, sn, ed)
+        write_user_data(sheet_id, sn, username, ed)
         st.rerun()
     
     st.divider()
@@ -533,11 +529,10 @@ def show_week_view():
             pb = create_pdf(ed, sn)
             st.download_button("⬇️ PDF", pb, f"Rota_{sn.replace(' ','_')}.pdf", mime="application/pdf")
         with dc2c:
-            # Create a full workbook on the fly from all generated weeks
             full_buf = io.BytesIO()
             with pd.ExcelWriter(full_buf, engine='openpyxl') as writer:
                 for week_name in gw.values():
-                    sheet_df = get_sheet_data(sheet_id, week_name)
+                    sheet_df = get_user_data(sheet_id, week_name, username)
                     sheet_df.to_excel(writer, index=False, sheet_name=week_name)
             st.download_button("⬇️ Full Workbook", full_buf.getvalue(), "Final_Rota_Full.xlsx")
 
@@ -545,11 +540,11 @@ def show_week_view():
 # VIEW 3: DAY
 # ======================================================
 def show_day_view():
-    gw = get_generated_weeks()
+    gw = get_generated_weeks(username)
     sd = st.session_state.selected_date
     ws = st.session_state.week_start
     sn = gw.get(ws)
-    roles = get_employee_roles()
+    roles = get_employee_roles(username)
     
     c1, c2 = st.columns([1.2, 7])
     with c1:
@@ -565,7 +560,7 @@ def show_day_view():
         st.error("No rota found.")
         return
     
-    df = load_week_rota(sn)
+    df = load_week_rota(sn, username)
     if df is None:
         st.error("Could not load rota.")
         return
