@@ -12,12 +12,13 @@ from gsheets_db import get_user_data, write_user_data
 # AUTH & SETUP
 # ======================================================
 
-# Verify user is logged in and has a sheet ID assigned
-if 'sheet_id' not in st.session_state:
+# Verify user is logged in and has a sheet ID AND username assigned
+if 'sheet_id' not in st.session_state or 'username' not in st.session_state:
     st.error("Please log in to access Event Intelligence.")
     st.stop()
 
 sheet_id = st.session_state['sheet_id']
+username = st.session_state['username']
 SHEET_EVENTS = "Events"
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -52,9 +53,9 @@ def impact_label(score):
 
 
 def load_data():
-    """Load events directly from Google Sheets."""
+    """Load events directly from Google Sheets for the logged-in user."""
     try:
-        df = get_sheet_data(sheet_id, SHEET_EVENTS)
+        df = get_user_data(sheet_id, SHEET_EVENTS, username)
         if not df.empty:
             df.columns = df.columns.str.strip()
             if "Date" in df.columns:
@@ -148,11 +149,11 @@ with c1:
                 try:
                     result = scan_live(30)  # Scan today + 30 days
                     if result is not None and not result.empty:
-                        # Upload directly to Google Sheets
+                        # Upload directly to Google Sheets, tied to this username
                         df_upload = result.copy()
                         if "Date" in df_upload.columns:
                             df_upload["Date"] = pd.to_datetime(df_upload["Date"]).dt.strftime('%Y-%m-%d')
-                        write_sheet_data(sheet_id, SHEET_EVENTS, df_upload)
+                        write_user_data(sheet_id, SHEET_EVENTS, username, df_upload)
                         
                         st.success(f"Found {len(result)} events and synced to cloud!")
                     else:
