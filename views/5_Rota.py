@@ -124,9 +124,11 @@ def get_generated_weeks():
     r = {}
     sheet_names = get_all_sheet_names()
     for sheet in sheet_names:
-        # Optimization: Only process sheets that look like Rotas (e.g., "Week X")
+        # Optimization: Only process sheets that look like Rotas
         if sheet in ["Employees", "Shift Templates", "Events", "Holidays", "Data"]: continue
-        if "Week" not in sheet: continue
+        
+        # --- FIXED BUG HERE ---
+        if "Rota_" not in sheet: continue 
         
         try:
             df = get_sheet_data(sheet_id, sheet)
