@@ -47,10 +47,10 @@ EVENING_START_HOUR = 17
 MORNING_END_HOUR = 12    
 
 # --- SOFT CONSTRAINT WEIGHTS ---
-WEIGHT_PREFERRED_DAY = 100      
-WEIGHT_PREFERRED_SLOT = 50      
-WEIGHT_FAIRNESS = 1 # Quadratic load balancer
-WEIGHT_UTILIZATION = 100 # Reward for scheduling hours up to the budget
+WEIGHT_UTILIZATION = 5000    # Massive reward to force the AI to exhaust the budget
+WEIGHT_FAIRNESS = 50         # Strong penalty for hogging "Extra" hours
+WEIGHT_PREFERRED_DAY = 200   # Will allow a 2-hour extra disparity to respect a preferred day
+WEIGHT_PREFERRED_SLOT = 100  # Will allow a 1-hour extra disparity to respect a preferred time
 
 # ==============================================================================
 
@@ -147,6 +147,7 @@ def solve_rota_final_v14(sheet_id=None, target_weeks=None, username=None):
     )
     
     if target_weeks:
+        # Convert incoming target weeks strictly to string formats
         t_weeks_str = [x.strftime('%Y-%m-%d') if hasattr(x, 'strftime') else str(x) for x in target_weeks]
         df_shifts = df_shifts[df_shifts['Week_Start_Str'].isin(t_weeks_str)].copy()
 
@@ -326,10 +327,14 @@ def solve_rota_final_v14(sheet_id=None, target_weeks=None, username=None):
             model.Add(emp_hours_var >= adjusted_min)
             model.Add(emp_hours_var <= original_max)
             
-            # LOAD BALANCER: Square the hours variable to heavily penalize unfair concentrations
-            sq_hours = model.NewIntVar(0, 10000, f'sq_hrs_{idx}')
-            model.AddMultiplicationEquality(sq_hours, [emp_hours_var, emp_hours_var])
-            objective_terms.append(-WEIGHT_FAIRNESS * sq_hours) # Subtract from objective
+            # --- FAIRNESS 2.0: Isolate "Extra Hours" (hours above minimum) ---
+            extra_hours_var = model.NewIntVar(0, 100, f'extra_hrs_{idx}')
+            model.Add(extra_hours_var == emp_hours_var - adjusted_min)
+            
+            # Square the extra hours to heavily penalize unfair concentrations of the remaining budget
+            sq_extra_hours = model.NewIntVar(0, 10000, f'sq_extra_hrs_{idx}')
+            model.AddMultiplicationEquality(sq_extra_hours, [extra_hours_var, extra_hours_var])
+            objective_terms.append(-WEIGHT_FAIRNESS * sq_extra_hours) # Subtract from objective
             
             total_working_days = [is_working_day[(idx, d)] for d in dates_in_order]
             model.Add(sum(total_working_days) <= MAX_CONSECUTIVE_DAYS) 
