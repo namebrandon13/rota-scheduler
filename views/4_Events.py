@@ -5,12 +5,22 @@ import calendar
 from datetime import datetime, date, timedelta
 import pydeck as pdk
 
+# Import your new database handler
+from gsheets_db import get_sheet_data, write_sheet_data
+
 # ======================================================
-# CLOUD READY PATHS
+# AUTH & SETUP
 # ======================================================
 
+# Verify user is logged in and has a sheet ID assigned
+if 'sheet_id' not in st.session_state:
+    st.error("Please log in to access Event Intelligence.")
+    st.stop()
+
+sheet_id = st.session_state['sheet_id']
+SHEET_EVENTS = "Events"
+
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-EVENTS_FILE = os.path.join(BASE_DIR, "EventsData.xlsx")
 
 # ======================================================
 # IMPORT EVENT SCANNER
@@ -42,15 +52,16 @@ def impact_label(score):
 
 
 def load_data():
-    if not os.path.exists(EVENTS_FILE):
-        return pd.DataFrame()
+    """Load events directly from Google Sheets."""
     try:
-        df = pd.read_excel(EVENTS_FILE)
-        df.columns = df.columns.str.strip()
-        if "Date" in df.columns:
-            df["Date"] = pd.to_datetime(df["Date"])
+        df = get_sheet_data(sheet_id, SHEET_EVENTS)
+        if not df.empty:
+            df.columns = df.columns.str.strip()
+            if "Date" in df.columns:
+                df["Date"] = pd.to_datetime(df["Date"])
         return df
-    except:
+    except Exception as e:
+        st.error(f"Error loading events from Google Sheets: {e}")
         return pd.DataFrame()
 
 
@@ -133,11 +144,17 @@ c1, c2, c3 = st.columns([1.5, 1.5, 4])
 with c1:
     if st.button("🔄 Run Live Scan", type="primary", use_container_width=True):
         if scan_live:
-            with st.spinner("Scanning today + 30 days..."):
+            with st.spinner("Scanning today + 30 days & syncing to cloud..."):
                 try:
                     result = scan_live(30)  # Scan today + 30 days
                     if result is not None and not result.empty:
-                        st.success(f"Found {len(result)} events!")
+                        # Upload directly to Google Sheets
+                        df_upload = result.copy()
+                        if "Date" in df_upload.columns:
+                            df_upload["Date"] = pd.to_datetime(df_upload["Date"]).dt.strftime('%Y-%m-%d')
+                        write_sheet_data(sheet_id, SHEET_EVENTS, df_upload)
+                        
+                        st.success(f"Found {len(result)} events and synced to cloud!")
                     else:
                         st.info("No new events found.")
                     st.rerun()
@@ -154,7 +171,7 @@ with c2:
 # ======================================================
 
 if df.empty:
-    st.info("No event data available. Click 'Run Live Scan' to fetch events.")
+    st.info("No event data available in the cloud. Click 'Run Live Scan' to fetch events.")
     st.stop()
 
 # ======================================================
