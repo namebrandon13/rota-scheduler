@@ -30,26 +30,26 @@ SHEET_USERS = "Users"
 # ======================================================
 
 def update_user_location(sheet_id, username, lat, lon):
-    """Updates the 'Location' column in the 'Users' sheet for the current user."""
-    # 1. Fetch the entire Users sheet
     df_users = get_user_data(sheet_id, SHEET_USERS, username)
     
     if df_users.empty:
-        st.error("User record not found in database.")
+        st.error("User record not found.")
         return False
 
-    # 2. Prepare the coordinate string as JSON
+    # Clean the columns to handle accidental spaces in Excel
+    df_users.columns = df_users.columns.str.strip()
+
     location_data = json.dumps({"lat": lat, "lon": lon})
 
-    # 3. Update the 'Location' column for the current username
     if 'Location' in df_users.columns:
-        df_users.loc[df_users['Username'] == username, 'Location'] = location_data
+        # Locate the specific user row by username
+        mask = df_users['Username'].astype(str) == str(username)
+        df_users.loc[mask, 'Location'] = location_data
         
-        # 4. Write back the updated dataframe to Google Sheets
         write_user_data(sheet_id, SHEET_USERS, username, df_users)
         return True
     else:
-        st.error("Column 'Location' not found in Users sheet. Please add it to your Excel/Sheets.")
+        st.error(f"Column 'Location' not found. AI sees: {list(df_users.columns)}")
         return False
 
 def impact_color(score):
