@@ -30,26 +30,37 @@ SHEET_USERS = "Users"
 # ======================================================
 
 def update_user_location(sheet_id, username, lat, lon):
+    """Updates the 'Location' column in the 'Users' sheet for the current user."""
+    # 1. Fetch the entire Users sheet
     df_users = get_user_data(sheet_id, SHEET_USERS, username)
     
     if df_users.empty:
         st.error("User record not found.")
         return False
 
-    # Clean the columns to handle accidental spaces in Excel
-    df_users.columns = df_users.columns.str.strip()
+    # Clean the column names (removes spaces, hidden characters)
+    df_users.columns = [str(c).strip() for c in df_users.columns]
 
+    # 2. Prepare the coordinate string
     location_data = json.dumps({"lat": lat, "lon": lon})
 
-    if 'Location' in df_users.columns:
-        # Locate the specific user row by username
-        mask = df_users['Username'].astype(str) == str(username)
-        df_users.loc[mask, 'Location'] = location_data
+    # 3. SAFETY NET: If 'Location' is missing, create it now
+    if 'Location' not in df_users.columns:
+        st.warning("Location column was missing from the dataframe. Adding it now...")
+        df_users['Location'] = ""
+
+    # 4. Update the row for this specific user
+    # We use .loc to find the row where Username matches
+    user_mask = df_users['Username'].astype(str) == str(username)
+    
+    if not df_users[user_mask].empty:
+        df_users.loc[user_mask, 'Location'] = location_data
         
+        # 5. Write back to the Users sheet
         write_user_data(sheet_id, SHEET_USERS, username, df_users)
         return True
     else:
-        st.error(f"Column 'Location' not found. AI sees: {list(df_users.columns)}")
+        st.error(f"Could not find a row for username: {username}")
         return False
 
 def impact_color(score):
