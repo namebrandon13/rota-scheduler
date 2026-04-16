@@ -139,7 +139,7 @@ def solve_rota_final_v14(sheet_id=None, target_weeks=None):
     run_event_tracker()
 
     df_emp = get_sheet_data(sheet_id, "Employees")
-    df_shifts = get_sheet_data(sheet_id, "Shift Templates") 
+    df_shifts = get_sheet_data(sheet_id, "Shift Template") 
     df_hol = get_sheet_data(sheet_id, "Holidays") 
     
     # 🔴 ERROR TRAP 1: Missing Data in Google Sheets
