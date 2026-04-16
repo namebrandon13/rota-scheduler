@@ -4,6 +4,7 @@ import os
 import calendar
 from datetime import datetime, date, time, timedelta
 import pydeck as pdk
+import math
 
 # Import your new database handler
 from gsheets_db import get_user_data, write_user_data
@@ -21,6 +22,7 @@ sheet_id = st.session_state['sheet_id']
 username = st.session_state['username']
 SHEET_TEMPLATE = "Shift Template"
 SHEET_EVENTS = "Events"
+SHEET_EMPLOYEES = "Employees" # Added to fetch contract hours
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -129,7 +131,6 @@ def get_week_start(d):
 @st.cache_data(ttl=10)
 def load_all(user):
     try:
-        # Fetch only this user's templates
         df = get_user_data(sheet_id, SHEET_TEMPLATE, user)
         if df.empty:
             return pd.DataFrame()
@@ -148,7 +149,6 @@ def load_all(user):
 
 def load_events_for_week(ws, user):
     try:
-        # Fetch only this user's events
         df = get_user_data(sheet_id, SHEET_EVENTS, user)
         if df.empty:
             return pd.DataFrame()
@@ -161,9 +161,28 @@ def load_events_for_week(ws, user):
         st.error(f"Error loading events: {e}")
         return pd.DataFrame()
 
+@st.cache_data(ttl=10)
+def get_required_shifts(user):
+    """Calculates the absolute minimum shifts required across all employees."""
+    try:
+        df = get_user_data(sheet_id, SHEET_EMPLOYEES, user)
+        if df.empty: return 0
+        
+        def calc_shifts(hrs):
+            try:
+                h = float(hrs)
+                if pd.isna(h): return 0
+                return math.ceil(h / 9.0) # Assuming 9 is MAX_SHIFT_LENGTH
+            except: return 0
+        
+        if 'Minimum Contractual Hours' in df.columns:
+            return sum(df['Minimum Contractual Hours'].apply(calc_shifts))
+        return 0
+    except:
+        return 0
+
 def save_all(df, user):
     try:
-        # CRITICAL REPAIR: Drop any duplicated days so the database stays perfectly clean
         df['Date'] = pd.to_datetime(df['Date'])
         df = df.sort_values('Date').drop_duplicates(subset=['Date'], keep='last')
 
@@ -174,7 +193,6 @@ def save_all(df, user):
             if col in df_upload.columns:
                 df_upload[col] = df_upload[col].apply(lambda x: x.strftime('%H:%M:%S') if pd.notna(x) else '')
                 
-        # Save only to this user's partition
         write_user_data(sheet_id, SHEET_TEMPLATE, user, df_upload)
         st.cache_data.clear()
     except Exception as e:
@@ -203,6 +221,30 @@ def impact_label(score):
     if score >= 8: return "HIGH"
     elif score >= 5: return "MEDIUM"
     return "LOW"
+
+def display_compact_events(events_df):
+    """A clean, compact event display for the Edit/Add screens."""
+    if events_df is None or events_df.empty:
+        st.info("✅ No significant events found for this week.")
+        return
+        
+    st.markdown("##### 🎫 Weekly Events Context")
+    for _, ev in events_df.iterrows():
+        score = int(ev.get('Impact Score', 0))
+        color = impact_color(score)
+        label = impact_label(score)
+        ev_date = ev['Date']
+        ev_date_str = ev_date.strftime('%A') if isinstance(ev_date, date) else str(ev_date)[:10]
+        
+        st.markdown(f"""
+        <div style='border-left: 4px solid {color}; background: #F8FAFC; padding: 8px 12px; margin-bottom: 6px; border-radius: 4px; display: flex; justify-content: space-between; align-items: center;'>
+            <div>
+                <strong style='color: #1E293B;'>{ev.get('Event Name', 'Event')}</strong>
+                <span style='color: #64748B; font-size: 0.85em; margin-left: 8px;'>📅 {ev_date_str} @ {ev.get('Start Time', '')}</span>
+            </div>
+            <span style='background:{color}; color:white; padding:2px 8px; border-radius:12px; font-size:0.75em; font-weight:bold;'>{label} IMPACT ({score}/10)</span>
+        </div>
+        """, unsafe_allow_html=True)
 
 # ======================================================
 # SIDEBAR
@@ -297,7 +339,6 @@ def show_week_view():
         st.warning("No data found.")
         return
 
-    # Use strict string comparison to fix the 'duplicates' bug
     ws_str = ws.strftime('%Y-%m-%d')
     df_all["_ws_str"] = df_all["Date"].apply(
         lambda x: (pd.to_datetime(x).date() - timedelta(days=pd.to_datetime(x).weekday())).strftime('%Y-%m-%d')
@@ -313,13 +354,41 @@ def show_week_view():
 
     wd = wd.drop(columns=["_ws_str"])
     budget = int(wd["Budget"].max()) if "Budget" in wd.columns else 300
+    
+    # 1. Budget Input
+    new_budget = st.number_input("Weekly Budget (hours)", value=budget, min_value=0, max_value=3000)
+    st.divider()
 
-    new_budget = st.number_input("Weekly Budget", value=budget, min_value=0, max_value=3000)
+    # 2. Contextual Events
+    events_df = load_events_for_week(ws, username)
+    display_compact_events(events_df)
+    st.write("")
+
+    # 3. Editable Table
+    st.markdown("##### 📋 Adjust Daily Requirements")
     edited = st.data_editor(wd, use_container_width=True, hide_index=True)
+    st.divider()
 
+    # 4. Mathematical Validation
+    required_shifts = get_required_shifts(username)
+    max_shifts_allowed = int(edited['Maximum Employees'].sum()) if 'Maximum Employees' in edited.columns else 0
+    
+    st.markdown("### ⚖️ Shift Balance Check")
+    sc1, sc2 = st.columns(2)
+    sc1.metric("Minimum Shifts Required", required_shifts, help="Based on employees' minimum contractual hours")
+    sc2.metric("Max Shifts Allowed", max_shifts_allowed, delta=max_shifts_allowed - required_shifts, help="Total of the 'Maximum Employees' column")
+    
+    can_save = True
+    if max_shifts_allowed < required_shifts:
+        st.error(f"⚠️ **Mathematical Impossibility:** You need at least {required_shifts} shifts to fulfill contracts, but your template only allows {max_shifts_allowed}. Please increase the 'Maximum Employees' limits in the table above.")
+        can_save = False
+    else:
+        st.success("✅ Shift balance looks good! The AI solver will be able to process this.")
+
+    # 5. Save/Back Controls
     c1, c2 = st.columns(2)
     with c1:
-        if st.button("💾 Save", type="primary", use_container_width=True):
+        if st.button("💾 Save Changes", type="primary", use_container_width=True, disabled=not can_save):
             edited["Budget"] = new_budget
             others = df_all[df_all["_ws_str"] != ws_str].drop(columns=["_ws_str"])
             final = pd.concat([others, edited], ignore_index=True)
@@ -346,11 +415,13 @@ def show_add_view():
 
     st.markdown(f"<div class='page-title'>➕ {ws.strftime('%d %b')} – {we.strftime('%d %b')}</div>", unsafe_allow_html=True)
 
-    # EVENT SCANNING SECTION
+    # 1. Budget
+    budget = st.number_input("Weekly Budget (hours)", value=300, min_value=0, max_value=3000)
+    st.divider()
+
+    # 2. Event Scanning & Display
     if ws >= today:
-        st.subheader("🎫 Events This Week")
         col_scan1, col_scan2 = st.columns([3, 1])
-        
         with col_scan2:
             if st.button("🔄 Scan Events", use_container_width=True):
                 st.session_state.events_scanned = False
@@ -365,7 +436,6 @@ def show_add_view():
                         st.session_state.week_events = scanned_df
                         st.session_state.events_scanned = True
                     except Exception as e:
-                        st.error(f"Event scan error: {e}")
                         st.session_state.week_events = pd.DataFrame()
                         st.session_state.events_scanned = True
                 else:
@@ -374,167 +444,11 @@ def show_add_view():
                 st.rerun()
         
         events_df = st.session_state.week_events
-        
-        if events_df is not None and not events_df.empty:
-            if 'Date' in events_df.columns:
-                events_df = events_df.copy()
-                if not isinstance(events_df['Date'].iloc[0], date):
-                    events_df['Date'] = pd.to_datetime(events_df['Date']).dt.date
-                events_df = events_df.sort_values('Date', ascending=True)
-            
-            st.success(f"Found **{len(events_df)} event(s)** this week!")
-            
-            with st.expander("🔍 Filters", expanded=False):
-                fc1, fc2 = st.columns(2)
-                with fc1:
-                    if "Impact Score" in events_df.columns:
-                        min_impact = int(events_df["Impact Score"].min())
-                        max_impact = int(events_df["Impact Score"].max())
-                        impact_range = st.slider("Impact Score", min_value=0, max_value=10, value=(min_impact, max_impact), key="add_impact_filter")
-                    else:
-                        impact_range = (0, 10)
-                
-                with fc2:
-                    if "Distance (Miles)" in events_df.columns:
-                        max_dist = float(events_df["Distance (Miles)"].max())
-                        distance_filter = st.slider("Max Distance (Miles)", min_value=0.0, max_value=max(max_dist, 5.0), value=max(max_dist, 5.0), step=0.1, key="add_distance_filter")
-                    else:
-                        distance_filter = 10.0
-            
-            filtered_events = events_df.copy()
-            if "Impact Score" in filtered_events.columns:
-                filtered_events = filtered_events[(filtered_events["Impact Score"] >= impact_range[0]) & (filtered_events["Impact Score"] <= impact_range[1])]
-            
-            if "Distance (Miles)" in filtered_events.columns:
-                filtered_events = filtered_events[filtered_events["Distance (Miles)"] <= distance_filter]
-            
-            if len(filtered_events) != len(events_df):
-                st.caption(f"Showing {len(filtered_events)} of {len(events_df)} events (filtered)")
-            
-            tab_cards, tab_cal, tab_map = st.tabs(["🃏 Cards", "📅 Calendar", "🗺️ Map"])
-            
-            with tab_cards:
-                if filtered_events.empty:
-                    st.info("No events match the current filters.")
-                else:
-                    cols = st.columns(2)
-                    for i, (_, ev) in enumerate(filtered_events.iterrows()):
-                        score = int(ev.get('Impact Score', 0))
-                        color = impact_color(score)
-                        label = impact_label(score)
-                        ev_date = ev['Date']
-                        ev_date_str = ev_date.strftime('%a %d %b') if isinstance(ev_date, date) else str(ev_date)[:10]
-                        distance = ev.get('Distance (Miles)', 0)
-                        
-                        with cols[i % 2]:
-                            with st.container(border=True):
-                                hc1, hc2 = st.columns([3, 1])
-                                with hc1: st.markdown(f"**{ev.get('Event Name', 'Unknown')}**")
-                                with hc2: st.markdown(f"<span style='background:{color};color:white;padding:4px 8px;border-radius:20px;font-size:0.72em;font-weight:700'>{label}</span>", unsafe_allow_html=True)
-                                st.caption(f"📅 {ev_date_str} · 🕐 {ev.get('Start Time', '')}")
-                                st.caption(f"📍 {ev.get('Venue', '')} · 📏 {distance:.1f} mi")
-                                st.progress(score / 10, text=f"Impact: {score}/10")
-            
-            with tab_cal:
-                event_map = {}
-                for _, ev in filtered_events.iterrows():
-                    d = ev['Date']
-                    if isinstance(d, date):
-                        event_map.setdefault(d, []).append(ev)
-                
-                for d in event_map:
-                    event_map[d] = sorted(event_map[d], key=lambda x: x.get('Impact Score', 0), reverse=True)
-                
-                day_cols = st.columns(7)
-                for i, day_name in enumerate(["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]):
-                    day_cols[i].markdown(f"**{day_name}**")
-                
-                week_cols = st.columns(7)
-                for i in range(7):
-                    day_date = ws + timedelta(days=i)
-                    day_events = event_map.get(day_date, [])
-                    
-                    with week_cols[i]:
-                        if day_events:
-                            max_score = max(int(x.get("Impact Score", 0)) for x in day_events)
-                            bg = impact_color(max_score) + "22"
-                            border = impact_color(max_score)
-                        else:
-                            bg = "#FFFFFF"
-                            border = "#E5E7EB"
-                        
-                        event_names = "<br>".join([f"<span style='font-size:0.7em;color:{impact_color(int(x.get('Impact Score', 0)))}'>● {str(x.get('Event Name', ''))[:20]}</span>" for x in day_events])
-                        min_height = max(100, 60 + len(day_events) * 18)
-                        
-                        st.markdown(
-                            f"""
-                            <div style='border:2px solid {border};border-radius:10px;padding:8px;
-                                min-height:{min_height}px;background:{bg};text-align:center'>
-                                <div style='font-size:1.4rem;font-weight:800;color:#1E293B'>{day_date.day}</div>
-                                <div style='font-size:0.75em;color:#64748B;margin-bottom:4px'>{day_date.strftime('%b')}</div>
-                                {event_names if day_events else "<span style='color:#CBD5E1;font-size:0.8em'>No events</span>"}
-                            </div>
-                            """,
-                            unsafe_allow_html=True
-                        )
-            
-            with tab_map:
-                if "Lat" not in filtered_events.columns or "Lon" not in filtered_events.columns:
-                    st.warning("No map coordinates available.")
-                else:
-                    map_df = filtered_events.dropna(subset=["Lat", "Lon"])
-                    if map_df.empty:
-                        st.warning("No map data for filtered events.")
-                    else:
-                        map_data = []
-                        for _, row in map_df.iterrows():
-                            score = int(row.get('Impact Score', 0))
-                            if score >= 8: color = [220, 38, 38, 200]
-                            elif score >= 5: color = [217, 119, 6, 200]
-                            else: color = [22, 163, 74, 200]
-                            
-                            map_data.append({
-                                'lat': float(row['Lat']),
-                                'lon': float(row['Lon']),
-                                'name': str(row.get('Event Name', 'Unknown')),
-                                'venue': str(row.get('Venue', '')),
-                                'score': score,
-                                'color': color
-                            })
-                        
-                        layer = pdk.Layer(
-                            "ScatterplotLayer",
-                            data=map_data,
-                            get_position='[lon, lat]',
-                            get_radius=150,
-                            get_fill_color='color',
-                            pickable=True
-                        )
-                        
-                        avg_lat = sum(d['lat'] for d in map_data) / len(map_data)
-                        avg_lon = sum(d['lon'] for d in map_data) / len(map_data)
-                        view_state = pdk.ViewState(latitude=avg_lat, longitude=avg_lon, zoom=13)
-                        
-                        deck = pdk.Deck(
-                            layers=[layer],
-                            initial_view_state=view_state,
-                            tooltip={
-                                "html": "<b>{name}</b><br>📍 {venue}<br>⚡ Impact: {score}/10",
-                                "style": {"backgroundColor": "#1E293B", "color": "white"}
-                            }
-                        )
-                        st.pydeck_chart(deck, use_container_width=True)
-                        st.caption("🔴 High (8-10) · 🟠 Medium (5-7) · 🟢 Low (1-4)")
-            
-            if any(filtered_events['Impact Score'] >= 8):
-                st.warning("⚠️ **High-impact events detected!** Consider adjusting staffing levels.")
-        else:
-            st.info("✅ No significant events found for this week.")
-        st.divider()
+        display_compact_events(events_df)
+    st.write("")
 
-    st.subheader("📋 Weekly Schedule Template")
-    budget = st.number_input("Weekly Budget (hours)", value=300, min_value=0, max_value=3000)
-
+    # 3. Editable Table
+    st.markdown("##### 📋 Setup Daily Requirements")
     rows = []
     for i in range(7):
         day_date = ws + timedelta(days=i)
@@ -549,10 +463,28 @@ def show_add_view():
 
     base = pd.DataFrame(rows)
     edited = st.data_editor(base, use_container_width=True, hide_index=True)
+    st.divider()
 
+    # 4. Mathematical Validation
+    required_shifts = get_required_shifts(username)
+    max_shifts_allowed = int(edited['Maximum Employees'].sum()) if 'Maximum Employees' in edited.columns else 0
+    
+    st.markdown("### ⚖️ Shift Balance Check")
+    sc1, sc2 = st.columns(2)
+    sc1.metric("Minimum Shifts Required", required_shifts, help="Based on employees' minimum contractual hours")
+    sc2.metric("Max Shifts Allowed", max_shifts_allowed, delta=max_shifts_allowed - required_shifts, help="Total of the 'Maximum Employees' column")
+    
+    can_save = True
+    if max_shifts_allowed < required_shifts:
+        st.error(f"⚠️ **Mathematical Impossibility:** You need at least {required_shifts} shifts to fulfill contracts, but your template only allows {max_shifts_allowed}. Please increase the 'Maximum Employees' limits in the table above.")
+        can_save = False
+    else:
+        st.success("✅ Shift balance looks good! The AI solver will be able to process this.")
+
+    # 5. Save/Back Controls
     col1, col2 = st.columns(2)
     with col1:
-        if st.button("💾 Save New Week", type="primary", use_container_width=True):
+        if st.button("💾 Save New Week", type="primary", use_container_width=True, disabled=not can_save):
             edited["Budget"] = budget
             df_all = load_all(username)
 
