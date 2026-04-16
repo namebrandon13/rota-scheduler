@@ -13,7 +13,7 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 EVENT_SCRIPT = os.path.join(BASE_DIR, "eventapicall.py")
 
 # ==============================================================================
-#                           BUSINESS CONTROL PANEL
+#                            BUSINESS CONTROL PANEL
 # ==============================================================================
 
 ENABLE_HYBRID_MODE = True
@@ -151,7 +151,8 @@ def load_events_for_dates(dates_list, sheet_id):
     
     return event_map
 
-def run_scheduler(sheet_id=None, selected_weeks=None):
+# RENAMED AND PARAMETERS UPDATED HERE:
+def solve_rota_final_v14(sheet_id=None, target_weeks=None):
     if not sheet_id:
         print("Error: No Google Sheet ID provided to scheduler.")
         return
@@ -162,8 +163,8 @@ def run_scheduler(sheet_id=None, selected_weeks=None):
 
     try:
         df_emp = get_sheet_data(sheet_id, "Employees")
-        df_shifts = get_sheet_data(sheet_id, "Shift Template")
-        df_hol = get_sheet_data(sheet_id, "Holiday")
+        df_shifts = get_sheet_data(sheet_id, "Shift Templates") # Updated to match your other files
+        df_hol = get_sheet_data(sheet_id, "Holidays") # Updated to match your other files
         
         if df_shifts.empty or df_emp.empty:
             print("CRITICAL ERROR: Shift Template or Employees data is empty.")
@@ -186,8 +187,8 @@ def run_scheduler(sheet_id=None, selected_weeks=None):
 
     # --- FILTERING LOGIC ---
     df_shifts['Week_Num'] = df_shifts['Date'].dt.isocalendar().week
-    if selected_weeks:
-        df_shifts = df_shifts[df_shifts['Week_Num'].isin(selected_weeks)].copy()
+    if target_weeks:
+        df_shifts = df_shifts[df_shifts['Week_Num'].isin(target_weeks)].copy()
 
     # Load Holidays
     approved_holidays = set() 
