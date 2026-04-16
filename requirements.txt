@@ -10,3 +10,5 @@ beautifulsoup4
 gspread
 gspread-dataframe
 oauth2client
+streamlit-folium
+folium
