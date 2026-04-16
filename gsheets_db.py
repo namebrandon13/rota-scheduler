@@ -12,25 +12,18 @@ def get_gspread_client():
     return gspread.authorize(creds)
 
 def get_user_database():
-    """Reads the Users tab and returns full user profiles."""
+    """Reads the Users tab to verify logins."""
     master_id = st.secrets["master_db_sheet_id"]
     client = get_gspread_client()
     try:
         sh = client.open_by_key(master_id)
         ws = sh.worksheet("Users")
-        # Ensure we get a clean dataframe
-        df = get_as_dataframe(ws, evaluate_formulas=True).dropna(how='all')
-        
+        df = get_as_dataframe(ws, evaluate_formulas=True).dropna(how='all').dropna(axis=1, how='all')
         users = {}
         for _, row in df.iterrows():
-            # Convert the whole row to a dictionary
-            user_info = row.to_dict()
-            # Use Username as the key, and store all columns as the value
-            users[str(row['Username'])] = user_info
-            
+            users[str(row['Username'])] = {"password": str(row['Password'])}
         return users
-    except Exception as e:
-        st.error(f"Database Error: {e}")
+    except:
         return {}
 
 def register_user_in_db(username, hashed_password):
