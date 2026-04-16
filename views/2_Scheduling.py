@@ -5,14 +5,23 @@ import calendar
 from datetime import datetime, date, time, timedelta
 import pydeck as pdk
 
+# Import your new database handler
+from gsheets_db import get_sheet_data, write_sheet_data
+
 # ======================================================
-# CLOUD READY PATHS
+# AUTH & SETUP
 # ======================================================
 
+# Verify user is logged in and has a sheet ID assigned
+if 'sheet_id' not in st.session_state:
+    st.error("Please log in to access the Scheduling Management.")
+    st.stop()
+
+sheet_id = st.session_state['sheet_id']
+SHEET_TEMPLATE = "Shift Template"
+SHEET_EVENTS = "Events"
+
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-FILE_PATH = os.path.join(BASE_DIR, "Book(Employees)_01.xlsx")
-EVENTS_FILE = os.path.join(BASE_DIR, "EventsData.xlsx")
-SHEET = "Shift Templates"
 
 # ======================================================
 # IMPORT EVENT SCANNER
@@ -120,10 +129,12 @@ def get_week_start(d):
 
 @st.cache_data(ttl=10)
 def load_all():
-    if not os.path.exists(FILE_PATH):
-        return pd.DataFrame()
+    """Loads shift template data from Google Sheets."""
     try:
-        df = pd.read_excel(FILE_PATH, sheet_name=SHEET)
+        df = get_sheet_data(sheet_id, SHEET_TEMPLATE)
+        if df.empty:
+            return pd.DataFrame()
+            
         df.columns = df.columns.str.strip()
         df["Date"] = pd.to_datetime(df["Date"])
         for col in ["Start", "End"]:
@@ -132,33 +143,42 @@ def load_all():
             except:
                 pass
         return df
-    except:
+    except Exception as e:
+        st.error(f"Error loading schedule: {e}")
         return pd.DataFrame()
 
 
 def load_events_for_week(ws):
-    """Load events from EventsData.xlsx for a specific week"""
-    if not os.path.exists(EVENTS_FILE):
-        return pd.DataFrame()
+    """Load events from Google Sheets for a specific week."""
     try:
-        df = pd.read_excel(EVENTS_FILE)
+        df = get_sheet_data(sheet_id, SHEET_EVENTS)
+        if df.empty:
+            return pd.DataFrame()
+            
         df['Date'] = pd.to_datetime(df['Date']).dt.date
         we = ws + timedelta(days=6)
         df = df[(df['Date'] >= ws) & (df['Date'] <= we)]
         return df.sort_values('Date')
-    except:
+    except Exception as e:
+        st.error(f"Error loading events: {e}")
         return pd.DataFrame()
 
 
 def save_all(df):
-    with pd.ExcelWriter(
-        FILE_PATH,
-        engine="openpyxl",
-        mode="a",
-        if_sheet_exists="replace"
-    ) as writer:
-        df.to_excel(writer, sheet_name="Shift Templates", index=False)
-    st.cache_data.clear()
+    """Saves shift templates back to Google Sheets."""
+    try:
+        # Convert date and time columns to strings before uploading to GSheets
+        df_upload = df.copy()
+        if 'Date' in df_upload.columns:
+            df_upload['Date'] = df_upload['Date'].apply(lambda x: x.strftime('%Y-%m-%d') if pd.notna(x) else '')
+        for col in ['Start', 'End']:
+            if col in df_upload.columns:
+                df_upload[col] = df_upload[col].apply(lambda x: x.strftime('%H:%M:%S') if pd.notna(x) else '')
+                
+        write_sheet_data(sheet_id, SHEET_TEMPLATE, df_upload)
+        st.cache_data.clear()
+    except Exception as e:
+        st.error(f"Error saving to Google Sheets: {e}")
 
 
 def nav_to(view, ws=None):
