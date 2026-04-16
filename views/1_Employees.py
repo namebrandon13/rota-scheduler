@@ -4,7 +4,7 @@ import os
 from datetime import datetime
 
 # Import your new database handler
-from gsheets_db import get_sheet_data, write_sheet_data
+from gsheets_db import get_user_data, write_user_data
 
 # ======================================================
 # AUTH & SETUP
