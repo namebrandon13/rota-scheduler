@@ -22,7 +22,7 @@ with tab_login:
                 st.session_state['logged_in'] = True
                 st.session_state['username'] = log_user
                 # Everyone uses the Master Sheet ID now!
-                st.session_state['sheet_id'] = st.secrets["master_db_sheet_id"]
+                st.secrets["master_db_sheet_id"] to st.session_state['sheet_id'] = user_data.get('SheetID')
                 st.success("Login successful! Loading dashboard...")
                 st.rerun()
             else:
