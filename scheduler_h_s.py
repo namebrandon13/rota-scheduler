@@ -47,8 +47,10 @@ EVENING_START_HOUR = 17
 MORNING_END_HOUR = 12    
 
 # --- SOFT CONSTRAINT WEIGHTS ---
-WEIGHT_PREFERRED_DAY = 10      
-WEIGHT_PREFERRED_SLOT = 5      
+# Scaled up significantly to allow the Fairness Penalty to act as a tie-breaker
+WEIGHT_PREFERRED_DAY = 100      
+WEIGHT_PREFERRED_SLOT = 50      
+WEIGHT_FAIRNESS = 1 # Quadratic load balancer
 
 # ==============================================================================
 
@@ -131,7 +133,6 @@ def solve_rota_final_v14(sheet_id=None, target_weeks=None, username=None):
     
     df_shifts['Date'] = pd.to_datetime(df_shifts['Date'])
     
-    # CRITICAL CLEANUP: Ignore any duplicated days lurking in the Google sheet
     df_shifts = df_shifts.sort_values("Date").drop_duplicates(subset=["Date"], keep="last")
 
     if 'Total Sales' not in df_shifts.columns:
@@ -139,13 +140,11 @@ def solve_rota_final_v14(sheet_id=None, target_weeks=None, username=None):
 
     df_shifts['Week_Num'] = df_shifts['Date'].dt.isocalendar().week
     
-    # Format Week_Start_Str strictly as string to prevent date matching bugs
     df_shifts['Week_Start_Str'] = df_shifts['Date'].apply(
         lambda x: (x.date() - timedelta(days=x.weekday())).strftime('%Y-%m-%d')
     )
     
     if target_weeks:
-        # Convert incoming target weeks strictly to string formats
         t_weeks_str = [x.strftime('%Y-%m-%d') if hasattr(x, 'strftime') else str(x) for x in target_weeks]
         df_shifts = df_shifts[df_shifts['Week_Start_Str'].isin(t_weeks_str)].copy()
 
@@ -193,6 +192,7 @@ def solve_rota_final_v14(sheet_id=None, target_weeks=None, username=None):
         work, start, is_working_day, daily_start_hour, daily_end_hour = {}, {}, {}, {}, {}
         emp_indices = df_emp.index.tolist()
         all_worked_hours_vars = []
+        objective_terms = []
 
         for idx in emp_indices:
             for i, row in week_data.iterrows():
@@ -285,8 +285,16 @@ def solve_rota_final_v14(sheet_id=None, target_weeks=None, username=None):
                 for h in range(pd.to_datetime(str(row['Start'])).hour, 24 if pd.to_datetime(str(row['End'])).hour == 0 else pd.to_datetime(str(row['End'])).hour)
             ]
             
-            model.Add(sum(total_hours_vars) >= adjusted_min)
-            model.Add(sum(total_hours_vars) <= original_max)
+            # Create a variable representing the employee's total hours
+            emp_hours_var = model.NewIntVar(0, 100, f'emp_hrs_{idx}')
+            model.Add(emp_hours_var == sum(total_hours_vars))
+            model.Add(emp_hours_var >= adjusted_min)
+            model.Add(emp_hours_var <= original_max)
+            
+            # LOAD BALANCER: Square the hours variable to heavily penalize unfair concentrations
+            sq_hours = model.NewIntVar(0, 10000, f'sq_hrs_{idx}')
+            model.AddMultiplicationEquality(sq_hours, [emp_hours_var, emp_hours_var])
+            objective_terms.append(-WEIGHT_FAIRNESS * sq_hours) # Subtract from objective
             
             total_working_days = [is_working_day[(idx, d)] for d in dates_in_order]
             model.Add(sum(total_working_days) <= MAX_CONSECUTIVE_DAYS) 
@@ -420,7 +428,6 @@ def solve_rota_final_v14(sheet_id=None, target_weeks=None, username=None):
                 date_str = row['Date'].strftime('%Y-%m-%d')
                 if unavailable_str != 'nan' and row['Date'].day_name() in unavailable_str: model.Add(is_working_day[(idx, date_str)] == 0)
 
-        objective_terms = []
         for idx in emp_indices:
             emp = employees[idx]
             pref_day = str(emp.get('Preferred Day', ''))
