@@ -42,6 +42,27 @@ VENUE_DB = {
 #                               HELPER FUNCTIONS
 # ==============================================================================
 
+
+def get_dynamic_location(sheet_id, username):
+    from gsheets_db import get_user_data
+    import json
+    
+    df = get_user_data(sheet_id, "Users", username)
+    user_row = df[df['Username'] == username]
+    
+    if not user_row.empty and 'Location' in user_row.columns:
+        loc_str = user_row.iloc[0]['Location']
+        try:
+            # Parse the JSON string back into coordinates
+            data = json.loads(loc_str)
+            return data['lat'], data['lon']
+        except:
+            pass
+            
+    # Default Fallback
+    return 51.5458, -0.1033
+
+
 def haversine_distance(lat1, lon1, lat2, lon2):
     if lat2 == 0.0 or lat2 is None: return 0.0
     R = 3958.8 
