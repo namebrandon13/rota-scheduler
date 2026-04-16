@@ -3,12 +3,19 @@ import pandas as pd
 import os
 from datetime import datetime
 
+# Import your new database handler
+from gsheets_db import get_sheet_data, write_sheet_data
+
 # ======================================================
-# PATHS
+# AUTH & SETUP
 # ======================================================
 
-BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-EMP_FILE = os.path.join(BASE_DIR, "Book(Employees)_01.xlsx")
+# Verify user is logged in and has a sheet ID assigned
+if 'sheet_id' not in st.session_state:
+    st.error("Please log in to access the Employees Management.")
+    st.stop()
+
+sheet_id = st.session_state['sheet_id']
 SHEET_NAME = "Employees"
 
 # ======================================================
@@ -88,36 +95,26 @@ if 'edit_emp_id' not in st.session_state:
 
 @st.cache_data(ttl=10)
 def load_employees():
-    if not os.path.exists(EMP_FILE):
-        return pd.DataFrame()
+    """Load employees from Google Sheets."""
     try:
-        df = pd.read_excel(EMP_FILE, sheet_name=SHEET_NAME)
-        df.columns = df.columns.str.strip()
+        df = get_sheet_data(sheet_id, SHEET_NAME)
+        if not df.empty:
+            df.columns = df.columns.str.strip()
         return df
     except Exception as e:
-        st.error(f"Error loading employees: {e}")
+        st.error(f"Error loading employees from Google Sheets: {e}")
         return pd.DataFrame()
 
 
 def save_employees(df):
-    """Save employees back to Excel, preserving other sheets"""
+    """Save employees back to Google Sheets. 
+    (write_sheet_data handles isolated tab updates automatically)"""
     try:
-        # Load all existing sheets
-        with pd.ExcelFile(EMP_FILE) as xls:
-            all_sheets = {sheet: pd.read_excel(xls, sheet_name=sheet) for sheet in xls.sheet_names}
-        
-        # Update Employees sheet
-        all_sheets[SHEET_NAME] = df
-        
-        # Write all sheets back
-        with pd.ExcelWriter(EMP_FILE, engine='openpyxl') as writer:
-            for sheet_name, sheet_df in all_sheets.items():
-                sheet_df.to_excel(writer, sheet_name=sheet_name, index=False)
-        
+        write_sheet_data(sheet_id, SHEET_NAME, df)
         st.cache_data.clear()
         return True
     except Exception as e:
-        st.error(f"Error saving: {e}")
+        st.error(f"Error saving to Google Sheets: {e}")
         return False
 
 
