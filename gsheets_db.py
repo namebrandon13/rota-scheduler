@@ -21,7 +21,7 @@ def get_user_database():
         df = get_as_dataframe(ws, evaluate_formulas=True).dropna(how='all').dropna(axis=1, how='all')
         users = {}
         for _, row in df.iterrows():
-            users[str(row['Username'])] = {"password": str(row['Password'])}
+            users[str(row['Username'])] = row.to_dict()
         return users
     except:
         return {}
