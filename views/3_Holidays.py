@@ -11,14 +11,15 @@ from gsheets_db import get_user_data, write_user_data
 # AUTH & SETUP
 # ======================================================
 
-# Verify user is logged in and has a sheet ID assigned
-if 'sheet_id' not in st.session_state:
+# Verify user is logged in and has a sheet ID AND username assigned
+if 'sheet_id' not in st.session_state or 'username' not in st.session_state:
     st.error("Please log in to access Holiday Management.")
     st.stop()
 
 sheet_id = st.session_state['sheet_id']
+username = st.session_state['username']
 
-SHEET_HOLIDAYS = "Holidays"
+SHEET_HOLIDAYS = "Holiday" # Changed from "Holidays" to match your DB creation script
 SHEET_EMPLOYEES = "Employees"
 
 # ======================================================
@@ -76,7 +77,7 @@ for k, v in defaults.items():
 # HELPERS
 # ======================================================
 
-def load_holidays():
+def load_holidays(user):
     cols = [
         "Employee ID",
         "Name",
@@ -86,7 +87,7 @@ def load_holidays():
     ]
 
     try:
-        df = get_sheet_data(sheet_id, SHEET_HOLIDAYS)
+        df = get_user_data(sheet_id, SHEET_HOLIDAYS, user)
         
         if df.empty:
             return pd.DataFrame(columns=cols)
@@ -114,20 +115,20 @@ def load_holidays():
         return pd.DataFrame(columns=cols)
 
 
-def save_holidays(df):
+def save_holidays(df, user):
     try:
         # Create a copy so we don't convert dates to strings in the live app UI
         df_upload = df.copy()
         df_upload["Date"] = pd.to_datetime(df_upload["Date"]).dt.strftime('%Y-%m-%d')
         
-        write_sheet_data(sheet_id, SHEET_HOLIDAYS, df_upload)
+        write_user_data(sheet_id, SHEET_HOLIDAYS, user, df_upload)
     except Exception as e:
         st.error(f"Error saving holidays to Google Sheets: {e}")
 
 
-def get_employee_lookup():
+def get_employee_lookup(user):
     try:
-        df = get_sheet_data(sheet_id, SHEET_EMPLOYEES)
+        df = get_user_data(sheet_id, SHEET_EMPLOYEES, user)
         
         if df.empty:
             return pd.DataFrame(columns=["ID", "Name"])
@@ -193,10 +194,10 @@ def group_into_ranges(df):
 
 @st.dialog("✈️ Request Holiday", width="large")
 def add_holiday_dialog():
-    emp_df = get_employee_lookup()
+    emp_df = get_employee_lookup(username)
 
     if emp_df.empty:
-        st.warning("No employees found.")
+        st.warning("No employees found. Please add employees first.")
         return
 
     with st.form("holiday_form"):
@@ -249,13 +250,13 @@ def add_holiday_dialog():
                     "Reason": reason
                 })
 
-            df = load_holidays()
-            df = pd.concat(
-                [df, pd.DataFrame(rows)],
-                ignore_index=True
-            )
+            df = load_holidays(username)
+            if df.empty:
+                df = pd.DataFrame(rows)
+            else:
+                df = pd.concat([df, pd.DataFrame(rows)], ignore_index=True)
 
-            save_holidays(df)
+            save_holidays(df, username)
 
             st.success("Submitted.")
             st.rerun()
@@ -264,7 +265,7 @@ def add_holiday_dialog():
 # PAGE
 # ======================================================
 
-df_h = load_holidays()
+df_h = load_holidays(username)
 
 st.markdown(
     "<div class='page-title'>✈️ Holiday Management</div>",
@@ -280,32 +281,12 @@ st.markdown(
 # METRICS
 # ======================================================
 
-pn = len(
-    df_h[
-        df_h["Status"]
-        .astype(str)
-        .str.lower()
-        .eq("pending")
-    ]
-)
-
-an = len(
-    df_h[
-        df_h["Status"]
-        .astype(str)
-        .str.lower()
-        .eq("approved")
-    ]
-)
-
-rn = len(
-    df_h[
-        df_h["Status"]
-        .astype(str)
-        .str.lower()
-        .eq("rejected")
-    ]
-)
+if not df_h.empty:
+    pn = len(df_h[df_h["Status"].astype(str).str.lower().eq("pending")])
+    an = len(df_h[df_h["Status"].astype(str).str.lower().eq("approved")])
+    rn = len(df_h[df_h["Status"].astype(str).str.lower().eq("rejected")])
+else:
+    pn = an = rn = 0
 
 m1, m2, m3, m4 = st.columns(4)
 
@@ -316,10 +297,7 @@ m4.metric("Rejected", rn)
 
 st.write("")
 
-if st.button(
-    "➕ Add Request",
-    type="primary"
-):
+if st.button("➕ Add Request", type="primary"):
     add_holiday_dialog()
 
 st.divider()
@@ -354,14 +332,15 @@ with c3:
 
 hol_map = {}
 
-for _, r in df_h.iterrows():
-    d = r["Date"].date()
-    hol_map.setdefault(d, []).append(
-        (
-            r["Name"],
-            r["Status"]
+if not df_h.empty:
+    for _, r in df_h.iterrows():
+        d = r["Date"].date()
+        hol_map.setdefault(d, []).append(
+            (
+                r["Name"],
+                r["Status"]
+            )
         )
-    )
 
 for week in calendar.monthcalendar(yr, mo):
     cols = st.columns(7)
@@ -445,12 +424,10 @@ tab1, tab2, tab3 = st.tabs([
 ])
 
 with tab1:
-    pending_df = df_h[
-        df_h["Status"]
-        .astype(str)
-        .str.lower()
-        .eq("pending")
-    ]
+    if not df_h.empty:
+        pending_df = df_h[df_h["Status"].astype(str).str.lower().eq("pending")]
+    else:
+        pending_df = pd.DataFrame()
 
     if pending_df.empty:
         st.success("No pending requests.")
@@ -477,7 +454,7 @@ with tab1:
                     (df_h["Status"] == "Pending")
                 )
                 df_h.loc[mask, "Status"] = "Approved"
-                save_holidays(df_h)
+                save_holidays(df_h, username)
                 st.rerun()
 
             if c2.button(
@@ -491,28 +468,29 @@ with tab1:
                     (df_h["Status"] == "Pending")
                 )
                 df_h.loc[mask, "Status"] = "Rejected"
-                save_holidays(df_h)
+                save_holidays(df_h, username)
                 st.rerun()
 
 with tab2:
-    appr = df_h[
-        df_h["Status"]
-        .astype(str)
-        .str.lower()
-        .eq("approved")
-    ]
-    st.dataframe(
-        appr,
-        use_container_width=True,
-        hide_index=True
-    )
+    if not df_h.empty:
+        appr = df_h[df_h["Status"].astype(str).str.lower().eq("approved")]
+        st.dataframe(
+            appr,
+            use_container_width=True,
+            hide_index=True
+        )
+    else:
+        st.info("No approved holidays.")
 
 with tab3:
-    st.dataframe(
-        df_h.sort_values(
-            "Date",
-            ascending=False
-        ),
-        use_container_width=True,
-        hide_index=True
-    )
+    if not df_h.empty:
+        st.dataframe(
+            df_h.sort_values(
+                "Date",
+                ascending=False
+            ),
+            use_container_width=True,
+            hide_index=True
+        )
+    else:
+        st.info("No data.")
