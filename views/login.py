@@ -17,16 +17,27 @@ with tab_login:
     
     if st.button("Login", type="primary"):
         with st.spinner("Verifying credentials..."):
+            # 1. Get the users dict (ensure it uses the new row.to_dict() logic)
             users = get_user_database()
-            if log_user in users and users[log_user]['password'] == hash_password(log_pass):
-                st.session_state['logged_in'] = True
-                st.session_state['username'] = log_user
-                # Everyone uses the Master Sheet ID now!
-                st.session_state['sheet_id'] = st.secrets["master_db_sheet_id"]
-                st.success("Login successful! Loading dashboard...")
-                st.rerun()
+            
+            if log_user in users:
+                user_data = users[log_user]
+                
+                # Check for 'Password' (Capital P) as it appears in your Excel
+                # We use .get() to prevent the app from crashing if the column is missing
+                stored_password = user_data.get('Password') or user_data.get('password')
+                
+                if stored_password and stored_password == hash_password(log_pass):
+                    st.session_state['logged_in'] = True
+                    st.session_state['username'] = log_user
+                    # Store the sheet ID associated with this user
+                    st.session_state['sheet_id'] = user_data.get('SheetID') 
+                    st.success("Logged in!")
+                    st.rerun()
+                else:
+                    st.error("Invalid password.")
             else:
-                st.error("Incorrect username or password.")
+                st.error("User not found.")
 
 # --- REGISTER TAB ---
 with tab_register:
