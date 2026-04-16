@@ -22,7 +22,7 @@ if 'sheet_id' not in st.session_state:
 sheet_id = st.session_state['sheet_id']
 
 SHEET_EMPLOYEES = "Employees"
-SHEET_TEMPLATES = "Shift Templates"
+SHEET_TEMPLATES = "Shift Template"
 
 # ======================================================
 # ROLE COLORS
