@@ -51,6 +51,7 @@ MORNING_END_HOUR = 12
 WEIGHT_PREFERRED_DAY = 100      
 WEIGHT_PREFERRED_SLOT = 50      
 WEIGHT_FAIRNESS = 1 # Quadratic load balancer
+WEIGHT_UTILIZATION = 100 # Reward for scheduling hours up to the budget
 
 # ==============================================================================
 
@@ -133,6 +134,7 @@ def solve_rota_final_v14(sheet_id=None, target_weeks=None, username=None):
     
     df_shifts['Date'] = pd.to_datetime(df_shifts['Date'])
     
+    # CRITICAL CLEANUP: Ignore any duplicated days lurking in the Google sheet
     df_shifts = df_shifts.sort_values("Date").drop_duplicates(subset=["Date"], keep="last")
 
     if 'Total Sales' not in df_shifts.columns:
@@ -140,11 +142,13 @@ def solve_rota_final_v14(sheet_id=None, target_weeks=None, username=None):
 
     df_shifts['Week_Num'] = df_shifts['Date'].dt.isocalendar().week
     
+    # Format Week_Start_Str strictly as string to prevent date matching bugs
     df_shifts['Week_Start_Str'] = df_shifts['Date'].apply(
         lambda x: (x.date() - timedelta(days=x.weekday())).strftime('%Y-%m-%d')
     )
     
     if target_weeks:
+        # Convert incoming target weeks strictly to string formats
         t_weeks_str = [x.strftime('%Y-%m-%d') if hasattr(x, 'strftime') else str(x) for x in target_weeks]
         df_shifts = df_shifts[df_shifts['Week_Start_Str'].isin(t_weeks_str)].copy()
 
@@ -455,6 +459,9 @@ def solve_rota_final_v14(sheet_id=None, target_weeks=None, username=None):
                         evening_hours = [work[(idx, date_str, h)] for h in range(max(EVENING_START_HOUR, start_h), end_h)]
                         if evening_hours:
                             for eh in evening_hours: objective_terms.append(WEIGHT_PREFERRED_SLOT * eh)
+
+        # REWARD FOR BUDGET UTILIZATION: Force the AI to max out the available budget
+        objective_terms.append(WEIGHT_UTILIZATION * sum(all_worked_hours_vars))
 
         model.Maximize(sum(objective_terms))
 
