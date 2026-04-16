@@ -48,6 +48,7 @@ MORNING_END_HOUR = 12
 
 # --- SOFT CONSTRAINT WEIGHTS ---
 # Scaled up significantly to allow the Fairness Penalty to act as a tie-breaker
+WEIGHT_UTILIZATION = 10
 WEIGHT_PREFERRED_DAY = 100      
 WEIGHT_PREFERRED_SLOT = 50      
 WEIGHT_FAIRNESS = 1 # Quadratic load balancer
@@ -211,6 +212,8 @@ def solve_rota_final_v14(sheet_id=None, target_weeks=None, username=None):
                     all_worked_hours_vars.append(work[(idx, date_str, h)])
 
         model.Add(sum(all_worked_hours_vars) <= weekly_budget_hours)
+        total_hours_worked = sum(all_worked_hours_vars)
+        objective_terms.append(WEIGHT_UTILIZATION * total_hours_worked)
 
         for idx in emp_indices:
             emp = employees[idx]
