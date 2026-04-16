@@ -247,6 +247,27 @@ def solve_rota_final_v14(sheet_id=None, target_weeks=None, username=None):
                                 if fixed_start <= h < fixed_end: model.Add(work[(idx, date_str, h)] == 1)
                                 else: model.Add(work[(idx, date_str, h)] == 0)
 
+
+        for idx in emp_indices:
+            emp = employees[idx]
+            fixed_role = str(emp.get('Fixed Role', '')).strip()
+            
+            if fixed_role in ['Opening', 'Closing']:
+                for i, row in week_data.iterrows():
+                    date_str = row['Date'].strftime('%Y-%m-%d')
+                    start_h = pd.to_datetime(str(row['Start'])).hour
+                    end_h = pd.to_datetime(str(row['End'])).hour
+                    if end_h == 0: end_h = 24
+                    
+                    if fixed_role == 'Opening':
+                        # If working, start time MUST equal the store's opening hour
+                        model.Add(daily_start_hour[(idx, date_str)] == start_h).OnlyEnforceIf(is_working_day[(idx, date_str)])
+                        
+                    elif fixed_role == 'Closing':
+                        # If working, end time MUST equal the store's closing hour
+                        model.Add(daily_end_hour[(idx, date_str)] == end_h).OnlyEnforceIf(is_working_day[(idx, date_str)])
+                        
+
         for idx in emp_indices:
             emp_id = employees[idx]['ID']
             for i, row in week_data.iterrows():
