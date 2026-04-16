@@ -18,11 +18,15 @@ with tab_login:
     if st.button("Login", type="primary"):
         with st.spinner("Verifying credentials..."):
             users = get_user_database()
-            if log_user in users and users[log_user]['password'] == hash_password(log_pass):
+            # Note: This logic assumes you are using the updated get_user_database
+            # that returns the full row dictionary.
+            if log_user in users and users[log_user].get('Password') == hash_password(log_pass):
                 st.session_state['logged_in'] = True
                 st.session_state['username'] = log_user
-                # Everyone uses the Master Sheet ID now!
-                st.secrets["master_db_sheet_id"] to st.session_state['sheet_id'] = user_data.get('SheetID')
+                
+                # Fetch SheetID specific to the user, fallback to master if missing
+                st.session_state['sheet_id'] = users[log_user].get('SheetID', st.secrets.get("master_db_sheet_id"))
+                
                 st.success("Login successful! Loading dashboard...")
                 st.rerun()
             else:
