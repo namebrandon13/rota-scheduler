@@ -18,15 +18,15 @@ with tab_login:
     if st.button("Login", type="primary"):
         with st.spinner("Verifying credentials..."):
             users = get_user_database()
-            if log_user in users and users[log_user]['password'] == hash_password(log_pass):
+            if log_user in users and users[log_user]['Password'] == hash_password(log_pass):
                 st.session_state['logged_in'] = True
-                st.session_state['username'] = log_user
+                st.session_state['Username'] = log_user
                 # Everyone uses the Master Sheet ID now!
                 st.session_state['sheet_id'] = st.secrets["master_db_sheet_id"]
                 st.success("Login successful! Loading dashboard...")
                 st.rerun()
             else:
-                st.error("Incorrect username or password.")
+                st.error("Incorrect Username or password.")
 
 # --- REGISTER TAB ---
 with tab_register:
