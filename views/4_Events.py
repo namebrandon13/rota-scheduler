@@ -31,36 +31,37 @@ SHEET_USERS = "Users"
 
 def update_user_location(sheet_id, username, lat, lon):
     """Updates the 'Location' column in the 'Users' sheet for the current user."""
-    # 1. Fetch the entire Users sheet
+    # 1. Fetch the Users sheet
     df_users = get_user_data(sheet_id, SHEET_USERS, username)
     
     if df_users.empty:
-        st.error("User record not found.")
+        st.error("User database is empty.")
         return False
 
-    # Clean the column names (removes spaces, hidden characters)
+    # --- CLEANUP STEP: Force headers to be clean strings ---
     df_users.columns = [str(c).strip() for c in df_users.columns]
+    
+    # 2. Check if the 'Username' column actually exists
+    if 'Username' not in df_users.columns:
+        st.error(f"Critical Error: 'Username' column not found. AI sees: {list(df_users.columns)}")
+        return False
 
-    # 2. Prepare the coordinate string
-    location_data = json.dumps({"lat": lat, "lon": lon})
-
-    # 3. SAFETY NET: If 'Location' is missing, create it now
+    # 3. Check/Create 'Location' column
     if 'Location' not in df_users.columns:
-        st.warning("Location column was missing from the dataframe. Adding it now...")
-        df_users['Location'] = ""
+        df_users['Location'] = None
 
-    # 4. Update the row for this specific user
-    # We use .loc to find the row where Username matches
+    # 4. Update logic
+    location_data = json.dumps({"lat": lat, "lon": lon})
+    
+    # Create the mask safely
     user_mask = df_users['Username'].astype(str) == str(username)
     
-    if not df_users[user_mask].empty:
+    if user_mask.any():
         df_users.loc[user_mask, 'Location'] = location_data
-        
-        # 5. Write back to the Users sheet
         write_user_data(sheet_id, SHEET_USERS, username, df_users)
         return True
     else:
-        st.error(f"Could not find a row for username: {username}")
+        st.error(f"User '{username}' not found in the Username column.")
         return False
 
 def impact_color(score):
