@@ -46,11 +46,11 @@ EVENT_THRESHOLDS = {
 EVENING_START_HOUR = 17 
 MORNING_END_HOUR = 12    
 
-# --- SOFT CONSTRAINT WEIGHTS ---
-# Utilization is high to ensure we use the budget
-# Extra Fairness is HIGHER to ensure that budget is shared equally
-WEIGHT_UTILIZATION = 1000   
-WEIGHT_EXTRA_FAIRNESS = 5000  # Penalty for hours worked ABOVE minimum (Square)
+# --- SOFT CONSTRAINT WEIGHTS (CRITICAL ADJUSTMENT) ---
+# We set Fairness so high that "favoring" anyone becomes mathematically painful.
+WEIGHT_UTILIZATION = 1000       # Goal: Spend the 300h budget
+WEIGHT_EXTRA_FAIRNESS = 100000  # Penalty for extra hours above minimum (Square)
+WEIGHT_FLAT_PENALTY = 5000      # Penalty for every single extra hour
 WEIGHT_PREFERRED_DAY = 200   
 WEIGHT_PREFERRED_SLOT = 100  
 
@@ -183,7 +183,7 @@ def solve_rota_final_v14(sheet_id=None, target_weeks=None, username=None):
                     all_worked_hours_vars.append(work[(idx, date_str, h)])
                     total_hours_vars.append(work[(idx, date_str, h)])
 
-            # --- CONTRACTS & EXTRA HOURS FAIRNESS ---
+            # --- CONTRACTS & AGGRESSIVE FAIRNESS ---
             emp = employees[idx]
             o_min = int(emp.get('Minimum Contractual Hours', 0))
             o_max = int(emp.get('Max Weekly Hours', 40))
@@ -193,12 +193,16 @@ def solve_rota_final_v14(sheet_id=None, target_weeks=None, username=None):
             model.Add(emp_total_h >= o_min)
             model.Add(emp_total_h <= o_max)
 
-            # Fairness: Penalize squaring the "Extra Hours" only.
+            # Fairness: Aggressively punish hours worked ABOVE minimum.
             extra_h = model.NewIntVar(0, 100, f'extra_h_{idx}')
             model.Add(extra_h == emp_total_h - o_min)
+            
             sq_extra_h = model.NewIntVar(0, 10000, f'sq_extra_h_{idx}')
             model.AddMultiplicationEquality(sq_extra_h, [extra_h, extra_h])
+            
+            # Substantial penalties to force the AI to distribute "Extra Pool" evenly
             objective_terms.append(-WEIGHT_EXTRA_FAIRNESS * sq_extra_h)
+            objective_terms.append(-WEIGHT_FLAT_PENALTY * extra_h)
 
         model.Add(sum(all_worked_hours_vars) <= weekly_budget_hours)
 
