@@ -47,7 +47,6 @@ EVENING_START_HOUR = 17
 MORNING_END_HOUR = 12    
 
 # --- SOFT CONSTRAINT WEIGHTS ---
-# Scaled up significantly to allow the Fairness Penalty to act as a tie-breaker
 WEIGHT_PREFERRED_DAY = 100      
 WEIGHT_PREFERRED_SLOT = 50      
 WEIGHT_FAIRNESS = 1 # Quadratic load balancer
@@ -148,7 +147,6 @@ def solve_rota_final_v14(sheet_id=None, target_weeks=None, username=None):
     )
     
     if target_weeks:
-        # Convert incoming target weeks strictly to string formats
         t_weeks_str = [x.strftime('%Y-%m-%d') if hasattr(x, 'strftime') else str(x) for x in target_weeks]
         df_shifts = df_shifts[df_shifts['Week_Start_Str'].isin(t_weeks_str)].copy()
 
@@ -191,10 +189,43 @@ def solve_rota_final_v14(sheet_id=None, target_weeks=None, username=None):
             val = week_data['Budget'].max()
             if not pd.isna(val) and val > 0: weekly_budget_hours = int(val)
 
+        # ==============================================================================
+        # AUTO-OVERRIDE CALCULATION
+        # Calculate exactly how much to boost the daily max headcount to fit the budget & contracts
+        # ==============================================================================
+        emp_indices = df_emp.index.tolist()
+        total_required_shifts = 0
+        for idx in emp_indices:
+            emp = employees[idx]
+            try:
+                if 'Minimum Contractual Hours' in emp: o_min = int(emp['Minimum Contractual Hours'])
+                elif 'Minimum Contractual Hours ' in emp: o_min = int(emp['Minimum Contractual Hours '])
+                else: o_min = 0 
+            except: o_min = 0
+            total_required_shifts += math.ceil(o_min / MAX_SHIFT_LENGTH)
+
+        total_allowed_shifts = 0
+        total_physical_hours = 0
+        
+        for _, row in week_data.iterrows():
+            m_max = int(row['Maximum Employees'])
+            total_allowed_shifts += m_max
+            s_h = pd.to_datetime(str(row['Start'])).hour
+            e_h = pd.to_datetime(str(row['End'])).hour
+            if e_h == 0: e_h = 24
+            total_physical_hours += (m_max * (e_h - s_h))
+            
+        contract_deficit = max(0, total_required_shifts - total_allowed_shifts)
+        budget_deficit_hours = max(0, weekly_budget_hours - total_physical_hours)
+        budget_deficit_shifts = math.ceil(budget_deficit_hours / MAX_SHIFT_LENGTH)
+        
+        total_shift_deficit = max(contract_deficit, budget_deficit_shifts)
+        daily_shift_boost = math.ceil(total_shift_deficit / len(week_data)) if len(week_data) > 0 else 0
+        # ==============================================================================
+
         model = cp_model.CpModel()
         
         work, start, is_working_day, daily_start_hour, daily_end_hour = {}, {}, {}, {}, {}
-        emp_indices = df_emp.index.tolist()
         all_worked_hours_vars = []
         objective_terms = []
 
@@ -359,7 +390,10 @@ def solve_rota_final_v14(sheet_id=None, target_weeks=None, username=None):
         for i, row in week_data.iterrows():
             date_str = row['Date'].strftime('%Y-%m-%d')
             day_name = row['Date'].day_name()
+            
+            # --- AUTO-OVERRIDE APPLIED HERE ---
             manual_min = int(row['Minimum Staff'])
+            manual_max = int(row['Maximum Employees']) + daily_shift_boost 
             
             day_event = event_data.get(date_str, None)
             event_impact = day_event['impact'] if day_event else 0
@@ -377,7 +411,6 @@ def solve_rota_final_v14(sheet_id=None, target_weeks=None, username=None):
             min_closing = int(row['Minimum closing staff'])
             min_headcount = max(final_min_headcount, min_closing)
             
-            manual_max = int(row['Maximum Employees'])
             if min_headcount > manual_max: min_headcount = manual_max
             max_headcount = manual_max  
 
