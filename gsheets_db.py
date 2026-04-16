@@ -3,6 +3,8 @@ import gspread
 import pandas as pd
 from oauth2client.service_account import ServiceAccountCredentials
 from gspread_dataframe import set_with_dataframe, get_as_dataframe
+import gspread
+from gspread_dataframe import set_with_dataframe
 
 def get_gspread_client():
     """Authenticates and returns the gspread client using Streamlit secrets."""
@@ -35,17 +37,36 @@ def get_sheet_data(sheet_id, tab_name):
         print(f"Error reading {tab_name}: {e}")
         return pd.DataFrame()
 
-def write_sheet_data(sheet_id, tab_name, df):
-    """Writes a DataFrame to a specific tab, replacing existing data. Creates tab if missing."""
-    client = get_gspread_client()
-    spreadsheet = client.open_by_key(sheet_id)
-    
+def write_sheet_data(sheet_id, worksheet_name, df):
+    """
+    Writes a DataFrame to a Google Sheet. 
+    If the tab (worksheet_name) doesn't exist, it creates a new one.
+    """
     try:
-        worksheet = spreadsheet.worksheet(tab_name)
-        worksheet.clear() # Clear existing data
-    except gspread.exceptions.WorksheetNotFound:
-        # Create it if it doesn't exist
-        worksheet = spreadsheet.add_worksheet(title=tab_name, rows="100", cols="20")
-    
-    # Write the new dataframe
-    set_with_dataframe(worksheet, df, resize=True)
+        client = get_gspread_client()
+        sh = client.open_by_key(sheet_id)
+        
+        # 1. Try to find the existing tab
+        try:
+            worksheet = sh.worksheet(worksheet_name)
+            print(f"Tab '{worksheet_name}' found. Overwriting...")
+        except gspread.exceptions.WorksheetNotFound:
+            # 2. If it doesn't exist, CREATE IT
+            print(f"Tab '{worksheet_name}' not found. Creating a new tab...")
+            
+            # Make sure we create enough rows/cols for the dataframe
+            num_rows = str(max(1000, len(df) + 100))
+            num_cols = str(max(26, len(df.columns) + 5))
+            
+            worksheet = sh.add_worksheet(title=worksheet_name, rows=num_rows, cols=num_cols)
+        
+        # 3. Clear old data and paste the new data
+        worksheet.clear()
+        set_with_dataframe(worksheet, df)
+        print(f"Successfully saved to Google Sheets tab: {worksheet_name}")
+        
+    except Exception as e:
+        print(f"CRITICAL WRITE ERROR: {e}")
+        # This will force the error to show up in your Streamlit app!
+        st.error(f"Google Sheets Upload Failed: {e}")
+        raise e
