@@ -8,7 +8,7 @@ from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph
 from reportlab.lib.styles import getSampleStyleSheet
 
 # Import your new database handler
-from gsheets_db import get_sheet_data, write_sheet_data, get_gspread_client
+from gsheets_db import get_user_data, write_user_data
 
 # ======================================================
 # AUTH & SETUP
