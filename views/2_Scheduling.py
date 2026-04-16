@@ -12,7 +12,6 @@ from gsheets_db import get_sheet_data, write_sheet_data
 # AUTH & SETUP
 # ======================================================
 
-# Verify user is logged in and has a sheet ID assigned
 if 'sheet_id' not in st.session_state:
     st.error("Please log in to access the Scheduling Management.")
     st.stop()
@@ -119,17 +118,14 @@ for k, v in defaults.items():
 # ======================================================
 
 def get_week_start(d):
-    """Convert any date/datetime to the Monday of that week as a date object."""
     if isinstance(d, datetime):
         d = d.date()
     elif isinstance(d, pd.Timestamp):
         d = d.date()
     return d - timedelta(days=d.weekday())
 
-
 @st.cache_data(ttl=10)
 def load_all():
-    """Loads shift template data from Google Sheets."""
     try:
         df = get_sheet_data(sheet_id, SHEET_TEMPLATE)
         if df.empty:
@@ -147,9 +143,7 @@ def load_all():
         st.error(f"Error loading schedule: {e}")
         return pd.DataFrame()
 
-
 def load_events_for_week(ws):
-    """Load events from Google Sheets for a specific week."""
     try:
         df = get_sheet_data(sheet_id, SHEET_EVENTS)
         if df.empty:
@@ -163,11 +157,12 @@ def load_events_for_week(ws):
         st.error(f"Error loading events: {e}")
         return pd.DataFrame()
 
-
 def save_all(df):
-    """Saves shift templates back to Google Sheets."""
     try:
-        # Convert date and time columns to strings before uploading to GSheets
+        # CRITICAL REPAIR: Drop any duplicated days so the database stays perfectly clean
+        df['Date'] = pd.to_datetime(df['Date'])
+        df = df.sort_values('Date').drop_duplicates(subset=['Date'], keep='last')
+
         df_upload = df.copy()
         if 'Date' in df_upload.columns:
             df_upload['Date'] = df_upload['Date'].apply(lambda x: x.strftime('%Y-%m-%d') if pd.notna(x) else '')
@@ -180,7 +175,6 @@ def save_all(df):
     except Exception as e:
         st.error(f"Error saving to Google Sheets: {e}")
 
-
 def nav_to(view, ws=None):
     st.session_state.sched_view = view
     if ws is not None:
@@ -190,26 +184,19 @@ def nav_to(view, ws=None):
         st.session_state.events_scanned = False
     st.rerun()
 
-
 def week_label(ws):
     we = ws + timedelta(days=6)
     wn = (ws + timedelta(days=3)).isocalendar()[1]
     return f"Week {wn} · {ws.strftime('%d %b')} – {we.strftime('%d %b %Y')}"
 
-
 def impact_color(score):
-    if score >= 8:
-        return "#DC2626"
-    elif score >= 5:
-        return "#D97706"
+    if score >= 8: return "#DC2626"
+    elif score >= 5: return "#D97706"
     return "#16A34A"
 
-
 def impact_label(score):
-    if score >= 8:
-        return "HIGH"
-    elif score >= 5:
-        return "MEDIUM"
+    if score >= 8: return "HIGH"
+    elif score >= 5: return "MEDIUM"
     return "LOW"
 
 # ======================================================
@@ -218,10 +205,8 @@ def impact_label(score):
 
 def get_sched_weeks():
     df = load_all()
-    if df.empty:
-        return set()
+    if df.empty: return set()
     return {get_week_start(d) for d in df["Date"]}
-
 
 def render_sidebar():
     sw = get_sched_weeks()
@@ -237,40 +222,27 @@ render_sidebar()
 
 def show_calendar():
     sw = get_sched_weeks()
-
-    st.markdown(
-        "<div class='page-title'>📅 Scheduling</div>",
-        unsafe_allow_html=True
-    )
-    st.markdown(
-        "<div class='page-sub'>Manage weekly templates</div>",
-        unsafe_allow_html=True
-    )
+    st.markdown("<div class='page-title'>📅 Scheduling</div>", unsafe_allow_html=True)
+    st.markdown("<div class='page-sub'>Manage weekly templates</div>", unsafe_allow_html=True)
 
     yr = st.session_state.sched_yr
     mo = st.session_state.sched_mo
 
     c1, c2, c3 = st.columns([1, 6, 1])
-
     with c1:
         if st.button("◀", key="prev_cal"):
             st.session_state.sched_mo = 12 if mo == 1 else mo - 1
-            if mo == 1:
-                st.session_state.sched_yr = yr - 1
+            if mo == 1: st.session_state.sched_yr = yr - 1
             st.rerun()
-
     with c2:
         st.markdown(f"## {datetime(yr, mo, 1).strftime('%B %Y')}")
-
     with c3:
         if st.button("▶", key="next_cal"):
             st.session_state.sched_mo = 1 if mo == 12 else mo + 1
-            if mo == 12:
-                st.session_state.sched_yr = yr + 1
+            if mo == 12: st.session_state.sched_yr = yr + 1
             st.rerun()
 
     st.write("")
-
     headers = st.columns(7)
     for i, d in enumerate(["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]):
         headers[i].markdown(f"**{d}**")
@@ -302,64 +274,49 @@ def show_calendar():
                     unsafe_allow_html=True
                 )
 
-                if st.button(
-                    "Edit" if has_data else "Add",
-                    key=f"day_{yr}_{mo}_{dn}"
-                ):
+                if st.button("Edit" if has_data else "Add", key=f"day_{yr}_{mo}_{dn}"):
                     nav_to("week" if has_data else "add", ws=ws)
 
 # ======================================================
-# EDIT WEEK
+# EDIT WEEK 
 # ======================================================
 
 def show_week_view():
     ws = st.session_state.sched_ws
-
     if ws is None:
         nav_to("calendar")
         return
 
     df_all = load_all()
-
     if df_all.empty:
         st.warning("No data found.")
         return
 
-    df_all["_ws"] = df_all["Date"].apply(lambda x: get_week_start(x))
-    wd = df_all[df_all["_ws"] == ws].copy()
-
-    st.markdown(
-        f"<div class='page-title'>✏️ {week_label(ws)}</div>",
-        unsafe_allow_html=True
+    # Use strict string comparison to fix the 'duplicates' bug
+    ws_str = ws.strftime('%Y-%m-%d')
+    df_all["_ws_str"] = df_all["Date"].apply(
+        lambda x: (pd.to_datetime(x).date() - timedelta(days=pd.to_datetime(x).weekday())).strftime('%Y-%m-%d')
     )
+    
+    wd = df_all[df_all["_ws_str"] == ws_str].copy()
+
+    st.markdown(f"<div class='page-title'>✏️ {week_label(ws)}</div>", unsafe_allow_html=True)
 
     if wd.empty:
         st.warning("No schedule found.")
         return
 
-    wd = wd.drop(columns=["_ws"])
-
+    wd = wd.drop(columns=["_ws_str"])
     budget = int(wd["Budget"].max()) if "Budget" in wd.columns else 300
 
-    new_budget = st.number_input(
-        "Weekly Budget",
-        value=budget,
-        min_value=0,
-        max_value=3000
-    )
-
-    edited = st.data_editor(
-        wd,
-        use_container_width=True,
-        hide_index=True
-    )
+    new_budget = st.number_input("Weekly Budget", value=budget, min_value=0, max_value=3000)
+    edited = st.data_editor(wd, use_container_width=True, hide_index=True)
 
     c1, c2 = st.columns(2)
-
     with c1:
         if st.button("💾 Save", type="primary", use_container_width=True):
             edited["Budget"] = new_budget
-            others = df_all[df_all["_ws"] != ws].drop(columns=["_ws"])
+            others = df_all[df_all["_ws_str"] != ws_str].drop(columns=["_ws_str"])
             final = pd.concat([others, edited], ignore_index=True)
             save_all(final)
             st.success("Saved.")
@@ -370,12 +327,11 @@ def show_week_view():
             nav_to("calendar")
 
 # ======================================================
-# ADD WEEK (with Event Scanning, Filters, and 3 Views)
+# ADD WEEK 
 # ======================================================
 
 def show_add_view():
     ws = st.session_state.sched_ws
-
     if ws is None:
         nav_to("calendar")
         return
@@ -383,19 +339,11 @@ def show_add_view():
     we = ws + timedelta(days=6)
     today = date.today()
 
-    st.markdown(
-        f"<div class='page-title'>➕ {ws.strftime('%d %b')} – {we.strftime('%d %b')}</div>",
-        unsafe_allow_html=True
-    )
+    st.markdown(f"<div class='page-title'>➕ {ws.strftime('%d %b')} – {we.strftime('%d %b')}</div>", unsafe_allow_html=True)
 
-    # ======================================================
     # EVENT SCANNING SECTION
-    # ======================================================
-    
     if ws >= today:
         st.subheader("🎫 Events This Week")
-        
-        # Scan button
         col_scan1, col_scan2 = st.columns([3, 1])
         
         with col_scan2:
@@ -404,7 +352,6 @@ def show_add_view():
                 st.session_state.week_events = None
                 st.rerun()
         
-        # Perform scan if not done yet
         if not st.session_state.events_scanned:
             with st.spinner("🔍 Scanning for events..."):
                 if scan_week:
@@ -421,133 +368,82 @@ def show_add_view():
                     st.session_state.events_scanned = True
                 st.rerun()
         
-        # Get events
         events_df = st.session_state.week_events
         
         if events_df is not None and not events_df.empty:
-            # Ensure Date is date type for sorting
             if 'Date' in events_df.columns:
                 events_df = events_df.copy()
                 if not isinstance(events_df['Date'].iloc[0], date):
                     events_df['Date'] = pd.to_datetime(events_df['Date']).dt.date
-                # Sort by date ascending (default)
                 events_df = events_df.sort_values('Date', ascending=True)
             
             st.success(f"Found **{len(events_df)} event(s)** this week!")
             
-            # ==========================================
-            # FILTERS
-            # ==========================================
             with st.expander("🔍 Filters", expanded=False):
                 fc1, fc2 = st.columns(2)
-                
                 with fc1:
-                    # Impact Score Filter
                     if "Impact Score" in events_df.columns:
                         min_impact = int(events_df["Impact Score"].min())
                         max_impact = int(events_df["Impact Score"].max())
-                        impact_range = st.slider(
-                            "Impact Score",
-                            min_value=0,
-                            max_value=10,
-                            value=(min_impact, max_impact),
-                            key="add_impact_filter"
-                        )
+                        impact_range = st.slider("Impact Score", min_value=0, max_value=10, value=(min_impact, max_impact), key="add_impact_filter")
                     else:
                         impact_range = (0, 10)
                 
                 with fc2:
-                    # Distance Filter
                     if "Distance (Miles)" in events_df.columns:
                         max_dist = float(events_df["Distance (Miles)"].max())
-                        distance_filter = st.slider(
-                            "Max Distance (Miles)",
-                            min_value=0.0,
-                            max_value=max(max_dist, 5.0),
-                            value=max(max_dist, 5.0),
-                            step=0.1,
-                            key="add_distance_filter"
-                        )
+                        distance_filter = st.slider("Max Distance (Miles)", min_value=0.0, max_value=max(max_dist, 5.0), value=max(max_dist, 5.0), step=0.1, key="add_distance_filter")
                     else:
                         distance_filter = 10.0
             
-            # Apply filters
             filtered_events = events_df.copy()
-            
             if "Impact Score" in filtered_events.columns:
-                filtered_events = filtered_events[
-                    (filtered_events["Impact Score"] >= impact_range[0]) &
-                    (filtered_events["Impact Score"] <= impact_range[1])
-                ]
+                filtered_events = filtered_events[(filtered_events["Impact Score"] >= impact_range[0]) & (filtered_events["Impact Score"] <= impact_range[1])]
             
             if "Distance (Miles)" in filtered_events.columns:
-                filtered_events = filtered_events[
-                    filtered_events["Distance (Miles)"] <= distance_filter
-                ]
+                filtered_events = filtered_events[filtered_events["Distance (Miles)"] <= distance_filter]
             
-            # Show filtered count
             if len(filtered_events) != len(events_df):
                 st.caption(f"Showing {len(filtered_events)} of {len(events_df)} events (filtered)")
             
-            # ==========================================
-            # TABS: Cards, Calendar, Map
-            # ==========================================
             tab_cards, tab_cal, tab_map = st.tabs(["🃏 Cards", "📅 Calendar", "🗺️ Map"])
             
-            # ---------- CARDS VIEW ----------
             with tab_cards:
                 if filtered_events.empty:
                     st.info("No events match the current filters.")
                 else:
                     cols = st.columns(2)
-                    
                     for i, (_, ev) in enumerate(filtered_events.iterrows()):
                         score = int(ev.get('Impact Score', 0))
                         color = impact_color(score)
                         label = impact_label(score)
                         ev_date = ev['Date']
-                        if isinstance(ev_date, date):
-                            ev_date_str = ev_date.strftime('%a %d %b')
-                        else:
-                            ev_date_str = str(ev_date)[:10]
-                        
+                        ev_date_str = ev_date.strftime('%a %d %b') if isinstance(ev_date, date) else str(ev_date)[:10]
                         distance = ev.get('Distance (Miles)', 0)
                         
                         with cols[i % 2]:
                             with st.container(border=True):
                                 hc1, hc2 = st.columns([3, 1])
-                                with hc1:
-                                    st.markdown(f"**{ev.get('Event Name', 'Unknown')}**")
-                                with hc2:
-                                    st.markdown(
-                                        f"<span style='background:{color};color:white;padding:4px 8px;"
-                                        f"border-radius:20px;font-size:0.72em;font-weight:700'>{label}</span>",
-                                        unsafe_allow_html=True
-                                    )
-                                
+                                with hc1: st.markdown(f"**{ev.get('Event Name', 'Unknown')}**")
+                                with hc2: st.markdown(f"<span style='background:{color};color:white;padding:4px 8px;border-radius:20px;font-size:0.72em;font-weight:700'>{label}</span>", unsafe_allow_html=True)
                                 st.caption(f"📅 {ev_date_str} · 🕐 {ev.get('Start Time', '')}")
                                 st.caption(f"📍 {ev.get('Venue', '')} · 📏 {distance:.1f} mi")
                                 st.progress(score / 10, text=f"Impact: {score}/10")
             
-            # ---------- CALENDAR VIEW ----------
             with tab_cal:
-                # Build event map for the week
                 event_map = {}
                 for _, ev in filtered_events.iterrows():
                     d = ev['Date']
                     if isinstance(d, date):
                         event_map.setdefault(d, []).append(ev)
                 
-                # Sort events by impact descending for each day
                 for d in event_map:
                     event_map[d] = sorted(event_map[d], key=lambda x: x.get('Impact Score', 0), reverse=True)
                 
-                # Day headers
                 day_cols = st.columns(7)
                 for i, day_name in enumerate(["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]):
                     day_cols[i].markdown(f"**{day_name}**")
                 
-                # Week row
                 week_cols = st.columns(7)
                 for i in range(7):
                     day_date = ws + timedelta(days=i)
@@ -562,13 +458,7 @@ def show_add_view():
                             bg = "#FFFFFF"
                             border = "#E5E7EB"
                         
-                        # Show ALL events, sorted by impact (highest first)
-                        event_names = "<br>".join([
-                            f"<span style='font-size:0.7em;color:{impact_color(int(x.get('Impact Score', 0)))}'>● {str(x.get('Event Name', ''))[:20]}</span>"
-                            for x in day_events
-                        ])
-                        
-                        # Calculate min-height based on number of events
+                        event_names = "<br>".join([f"<span style='font-size:0.7em;color:{impact_color(int(x.get('Impact Score', 0)))}'>● {str(x.get('Event Name', ''))[:20]}</span>" for x in day_events])
                         min_height = max(100, 60 + len(day_events) * 18)
                         
                         st.markdown(
@@ -583,26 +473,20 @@ def show_add_view():
                             unsafe_allow_html=True
                         )
             
-            # ---------- MAP VIEW ----------
             with tab_map:
                 if "Lat" not in filtered_events.columns or "Lon" not in filtered_events.columns:
                     st.warning("No map coordinates available.")
                 else:
                     map_df = filtered_events.dropna(subset=["Lat", "Lon"])
-                    
                     if map_df.empty:
                         st.warning("No map data for filtered events.")
                     else:
-                        # Create a clean DataFrame for pydeck with only needed columns
                         map_data = []
                         for _, row in map_df.iterrows():
                             score = int(row.get('Impact Score', 0))
-                            if score >= 8:
-                                color = [220, 38, 38, 200]
-                            elif score >= 5:
-                                color = [217, 119, 6, 200]
-                            else:
-                                color = [22, 163, 74, 200]
+                            if score >= 8: color = [220, 38, 38, 200]
+                            elif score >= 5: color = [217, 119, 6, 200]
+                            else: color = [22, 163, 74, 200]
                             
                             map_data.append({
                                 'lat': float(row['Lat']),
@@ -624,12 +508,7 @@ def show_add_view():
                         
                         avg_lat = sum(d['lat'] for d in map_data) / len(map_data)
                         avg_lon = sum(d['lon'] for d in map_data) / len(map_data)
-                        
-                        view_state = pdk.ViewState(
-                            latitude=avg_lat,
-                            longitude=avg_lon,
-                            zoom=13
-                        )
+                        view_state = pdk.ViewState(latitude=avg_lat, longitude=avg_lon, zoom=13)
                         
                         deck = pdk.Deck(
                             layers=[layer],
@@ -639,31 +518,17 @@ def show_add_view():
                                 "style": {"backgroundColor": "#1E293B", "color": "white"}
                             }
                         )
-                        
                         st.pydeck_chart(deck, use_container_width=True)
                         st.caption("🔴 High (8-10) · 🟠 Medium (5-7) · 🟢 Low (1-4)")
             
-            # Warning for high impact
             if any(filtered_events['Impact Score'] >= 8):
                 st.warning("⚠️ **High-impact events detected!** Consider adjusting staffing levels.")
-        
         else:
             st.info("✅ No significant events found for this week.")
-        
         st.divider()
-    
-    # ======================================================
-    # SCHEDULE TEMPLATE SECTION
-    # ======================================================
-    
-    st.subheader("📋 Weekly Schedule Template")
 
-    budget = st.number_input(
-        "Weekly Budget (hours)",
-        value=300,
-        min_value=0,
-        max_value=3000
-    )
+    st.subheader("📋 Weekly Schedule Template")
+    budget = st.number_input("Weekly Budget (hours)", value=300, min_value=0, max_value=3000)
 
     rows = []
     for i in range(7):
@@ -678,19 +543,9 @@ def show_add_view():
         })
 
     base = pd.DataFrame(rows)
+    edited = st.data_editor(base, use_container_width=True, hide_index=True)
 
-    edited = st.data_editor(
-        base,
-        use_container_width=True,
-        hide_index=True
-    )
-
-    # ======================================================
-    # SAVE BUTTON
-    # ======================================================
-    
     col1, col2 = st.columns(2)
-    
     with col1:
         if st.button("💾 Save New Week", type="primary", use_container_width=True):
             edited["Budget"] = budget
@@ -712,12 +567,7 @@ def show_add_view():
 # ======================================================
 # ROUTER
 # ======================================================
-
 view = st.session_state.sched_view
-
-if view == "calendar":
-    show_calendar()
-elif view == "week":
-    show_week_view()
-elif view == "add":
-    show_add_view()
+if view == "calendar": show_calendar()
+elif view == "week": show_week_view()
+elif view == "add": show_add_view()
