@@ -91,20 +91,23 @@ def get_user_database():
 
 def create_new_user_sheet(username):
     """
-    Creates a brand new Google Sheet for the user, shares it with the admin, 
-    and sets up the default tabs. Returns the new Sheet ID.
+    Creates a brand new Google Sheet inside the Admin's shared folder, 
+    shares it, and sets up the default tabs. Returns the new Sheet ID.
     """
+    import streamlit as st
     client = get_gspread_client()
+    
     admin_email = st.secrets["admin_email"]
+    folder_id = st.secrets["database_folder_id"]
     file_name = f"Rota_Scheduler_{username}"
     
-    print(f"Creating new Google Sheet: {file_name}...")
+    print(f"Creating new Google Sheet: {file_name} in folder {folder_id}...")
     
-    # 1. Create the new file in the Service Account's Drive
-    new_sheet = client.create(file_name)
+    # 1. Create the new file INSIDE your shared folder (fixes the quota error!)
+    new_sheet = client.create(file_name, folder_id=folder_id)
     new_sheet_id = new_sheet.id
     
-    # 2. Share it with the human admin so you can see it!
+    # 2. Share it explicitly just to be safe
     new_sheet.share(admin_email, perm_type='user', role='writer')
     
     # 3. Create the required tabs
