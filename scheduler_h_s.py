@@ -81,10 +81,10 @@ def run_event_tracker():
             subprocess.run([sys.executable, EVENT_SCRIPT], capture_output=True, text=True, cwd=BASE_DIR)
     except: pass
 
-def load_events_for_dates(dates_list, sheet_id):
+def load_events_for_dates(dates_list, df_ev): # <-- CHANGED THIS LINE
     event_map = {}
     try:
-        df_ev = get_sheet_data(sheet_id, 'Events')
+        # df_ev = get_sheet_data(sheet_id, 'Events')  <-- DELETE THIS LINE
         if df_ev.empty: return event_map
 
         df_ev.columns = df_ev.columns.str.strip()
@@ -119,6 +119,7 @@ def solve_rota_final_v14(sheet_id=None, target_weeks=None):
     df_emp = get_sheet_data(sheet_id, "Employees")
     df_shifts = get_sheet_data(sheet_id, "Shift Template") 
     df_hol = get_sheet_data(sheet_id, "Holiday") 
+    df_events = get_sheet_data(sheet_id, "Events") # <-- ADD THIS LINE HERE
     
     if df_emp.empty: raise ValueError("No data found in the 'Employees' tab. Please add employees first.")
     if df_shifts.empty: raise ValueError("No data found in the 'Shift Template' tab. Please set up shift rules first.")
@@ -178,7 +179,7 @@ def solve_rota_final_v14(sheet_id=None, target_weeks=None):
         week_data = week_data.sort_values('Date')
         dates_in_order = week_data['Date'].dt.strftime('%Y-%m-%d').unique()
         
-        event_data = load_events_for_dates(list(dates_in_order), sheet_id)
+        event_data = load_events_for_dates(list(dates_in_order), df_events)
         
         weekly_budget_hours = 9999
         if 'Budget' in week_data.columns:
