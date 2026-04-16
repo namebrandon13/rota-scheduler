@@ -4,13 +4,22 @@ import os
 import calendar
 from datetime import datetime, date, timedelta
 
+# Import your new database handler
+from gsheets_db import get_sheet_data, write_sheet_data
+
 # ======================================================
-# CLOUD READY PATHS
+# AUTH & SETUP
 # ======================================================
 
-BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-HOLIDAY_FILE = os.path.join(BASE_DIR, "Holidaydata.xlsx")
-EMPLOYEE_FILE = os.path.join(BASE_DIR, "Book(Employees)_01.xlsx")
+# Verify user is logged in and has a sheet ID assigned
+if 'sheet_id' not in st.session_state:
+    st.error("Please log in to access Holiday Management.")
+    st.stop()
+
+sheet_id = st.session_state['sheet_id']
+
+SHEET_HOLIDAYS = "Holidays"
+SHEET_EMPLOYEES = "Employees"
 
 # ======================================================
 # CONFIG
@@ -68,7 +77,6 @@ for k, v in defaults.items():
 # ======================================================
 
 def load_holidays():
-
     cols = [
         "Employee ID",
         "Name",
@@ -77,30 +85,11 @@ def load_holidays():
         "Reason"
     ]
 
-    if not os.path.exists(HOLIDAY_FILE):
-
-        df = pd.DataFrame(columns=cols)
-
-        with pd.ExcelWriter(
-            HOLIDAY_FILE,
-            engine="openpyxl",
-            mode="w"
-        ) as writer:
-
-            df.to_excel(
-                writer,
-                sheet_name="Data",
-                index=False
-            )
-
-        return df
-
     try:
-
-        df = pd.read_excel(
-            HOLIDAY_FILE,
-            sheet_name="Data"
-        )
+        df = get_sheet_data(sheet_id, SHEET_HOLIDAYS)
+        
+        if df.empty:
+            return pd.DataFrame(columns=cols)
 
         df.columns = df.columns.str.strip()
 
@@ -120,80 +109,48 @@ def load_holidays():
 
         return df
 
-    except:
+    except Exception as e:
+        st.error(f"Error loading holidays: {e}")
         return pd.DataFrame(columns=cols)
 
 
 def save_holidays(df):
-
-    df["Date"] = pd.to_datetime(
-        df["Date"]
-    ).dt.normalize()
-
-    if os.path.exists(HOLIDAY_FILE):
-
-        with pd.ExcelWriter(
-            HOLIDAY_FILE,
-            engine="openpyxl",
-            mode="a",
-            if_sheet_exists="replace"
-        ) as writer:
-
-            df.to_excel(
-                writer,
-                sheet_name="Data",
-                index=False
-            )
-
-    else:
-
-        with pd.ExcelWriter(
-            HOLIDAY_FILE,
-            engine="openpyxl",
-            mode="w"
-        ) as writer:
-
-            df.to_excel(
-                writer,
-                sheet_name="Data",
-                index=False
-            )
+    try:
+        # Create a copy so we don't convert dates to strings in the live app UI
+        df_upload = df.copy()
+        df_upload["Date"] = pd.to_datetime(df_upload["Date"]).dt.strftime('%Y-%m-%d')
+        
+        write_sheet_data(sheet_id, SHEET_HOLIDAYS, df_upload)
+    except Exception as e:
+        st.error(f"Error saving holidays to Google Sheets: {e}")
 
 
 def get_employee_lookup():
-
-    if not os.path.exists(EMPLOYEE_FILE):
-        return pd.DataFrame(columns=["ID", "Name"])
-
     try:
-
-        df = pd.read_excel(
-            EMPLOYEE_FILE,
-            sheet_name="Employees"
-        )
+        df = get_sheet_data(sheet_id, SHEET_EMPLOYEES)
+        
+        if df.empty:
+            return pd.DataFrame(columns=["ID", "Name"])
 
         df.columns = df.columns.str.strip()
-
         df["ID"] = df["ID"].astype(str).str.strip()
         df["Name"] = df["Name"].astype(str).str.strip()
 
         return df[["ID", "Name"]]
 
-    except:
+    except Exception as e:
+        st.error(f"Error loading employees: {e}")
         return pd.DataFrame(columns=["ID", "Name"])
 
 
 def group_into_ranges(df):
-
     if df.empty:
         return []
 
     out = []
-
     df = df.sort_values(["Name", "Date"])
 
     for name, grp in df.groupby("Name"):
-
         dates = sorted(
             grp["Date"].dt.date.tolist()
         )
@@ -205,12 +162,9 @@ def group_into_ranges(df):
         prev = dates[0]
 
         for d in dates[1:]:
-
             if (d - prev).days == 1:
                 prev = d
-
             else:
-
                 out.append({
                     "Name": name,
                     "Start": start,
@@ -219,7 +173,6 @@ def group_into_ranges(df):
                     "Status": status,
                     "Reason": reason
                 })
-
                 start = d
                 prev = d
 
@@ -240,7 +193,6 @@ def group_into_ranges(df):
 
 @st.dialog("✈️ Request Holiday", width="large")
 def add_holiday_dialog():
-
     emp_df = get_employee_lookup()
 
     if emp_df.empty:
@@ -248,7 +200,6 @@ def add_holiday_dialog():
         return
 
     with st.form("holiday_form"):
-
         emp = st.selectbox(
             "Employee",
             emp_df["Name"].tolist()
@@ -266,9 +217,7 @@ def add_holiday_dialog():
             value=date.today()
         )
 
-        reason = st.text_area(
-            "Reason"
-        )
+        reason = st.text_area("Reason")
 
         submitted = st.form_submit_button(
             "Submit Request",
@@ -277,7 +226,6 @@ def add_holiday_dialog():
         )
 
         if submitted:
-
             if ed < sd:
                 st.error("End before start.")
                 st.stop()
@@ -290,9 +238,7 @@ def add_holiday_dialog():
             )
 
             rows = []
-
             for i in range((ed - sd).days + 1):
-
                 rows.append({
                     "Employee ID": emp_id,
                     "Name": emp,
@@ -304,7 +250,6 @@ def add_holiday_dialog():
                 })
 
             df = load_holidays()
-
             df = pd.concat(
                 [df, pd.DataFrame(rows)],
                 ignore_index=True
@@ -410,9 +355,7 @@ with c3:
 hol_map = {}
 
 for _, r in df_h.iterrows():
-
     d = r["Date"].date()
-
     hol_map.setdefault(d, []).append(
         (
             r["Name"],
@@ -421,19 +364,15 @@ for _, r in df_h.iterrows():
     )
 
 for week in calendar.monthcalendar(yr, mo):
-
     cols = st.columns(7)
 
     for i, dn in enumerate(week):
-
         with cols[i]:
-
             if dn == 0:
                 st.write("")
                 continue
 
             curr = date(yr, mo, dn)
-
             vals = hol_map.get(curr, [])
 
             approved = any(
@@ -479,11 +418,8 @@ for week in calendar.monthcalendar(yr, mo):
 # ======================================================
 
 if st.session_state.hol_sel:
-
     sel = st.session_state.hol_sel
-
     st.divider()
-
     st.markdown(
         f"### {sel.strftime('%A %d %B %Y')}"
     )
@@ -509,7 +445,6 @@ tab1, tab2, tab3 = st.tabs([
 ])
 
 with tab1:
-
     pending_df = df_h[
         df_h["Status"]
         .astype(str)
@@ -520,11 +455,9 @@ with tab1:
     if pending_df.empty:
         st.success("No pending requests.")
     else:
-
         ranges = group_into_ranges(pending_df)
 
         for i, r in enumerate(ranges):
-
             st.markdown(
                 f"**{r['Name']}** | "
                 f"{r['Start']} → {r['End']} "
@@ -537,47 +470,37 @@ with tab1:
                 "Approve",
                 key=f"a{i}"
             ):
-
                 mask = (
                     (df_h["Name"] == r["Name"]) &
                     (df_h["Date"] >= pd.Timestamp(r["Start"])) &
                     (df_h["Date"] <= pd.Timestamp(r["End"])) &
                     (df_h["Status"] == "Pending")
                 )
-
                 df_h.loc[mask, "Status"] = "Approved"
-
                 save_holidays(df_h)
-
                 st.rerun()
 
             if c2.button(
                 "Reject",
                 key=f"r{i}"
             ):
-
                 mask = (
                     (df_h["Name"] == r["Name"]) &
                     (df_h["Date"] >= pd.Timestamp(r["Start"])) &
                     (df_h["Date"] <= pd.Timestamp(r["End"])) &
                     (df_h["Status"] == "Pending")
                 )
-
                 df_h.loc[mask, "Status"] = "Rejected"
-
                 save_holidays(df_h)
-
                 st.rerun()
 
 with tab2:
-
     appr = df_h[
         df_h["Status"]
         .astype(str)
         .str.lower()
         .eq("approved")
     ]
-
     st.dataframe(
         appr,
         use_container_width=True,
@@ -585,7 +508,6 @@ with tab2:
     )
 
 with tab3:
-
     st.dataframe(
         df_h.sort_values(
             "Date",
