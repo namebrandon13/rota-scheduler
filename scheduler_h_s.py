@@ -185,10 +185,13 @@ def solve_rota_final_v14(sheet_id=None, target_weeks=None):
     if 'Total Sales' not in df_shifts.columns:
         df_shifts['Total Sales'] = 0
 
-    # --- FILTERING LOGIC ---
+    # --- UPDATED FILTERING LOGIC ---
     df_shifts['Week_Num'] = df_shifts['Date'].dt.isocalendar().week
+    df_shifts['Week_Start_Date'] = df_shifts['Date'].apply(lambda x: (x.date() - timedelta(days=x.weekday())))
+    
     if target_weeks:
-        df_shifts = df_shifts[df_shifts['Week_Num'].isin(target_weeks)].copy()
+        # Now it properly compares the Date passed from the UI!
+        df_shifts = df_shifts[df_shifts['Week_Start_Date'].isin(target_weeks)].copy()
 
     # Load Holidays
     approved_holidays = set() 
