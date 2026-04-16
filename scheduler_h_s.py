@@ -6,8 +6,8 @@ import math
 import subprocess
 import sys
 
-# Import your Google Sheets DB handler
-from gsheets_db import get_sheet_data, write_sheet_data
+# Import your new database handler
+from gsheets_db import get_user_data, write_user_data
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 EVENT_SCRIPT = os.path.join(BASE_DIR, "eventapicall.py")
@@ -81,10 +81,9 @@ def run_event_tracker():
             subprocess.run([sys.executable, EVENT_SCRIPT], capture_output=True, text=True, cwd=BASE_DIR)
     except: pass
 
-def load_events_for_dates(dates_list, df_ev): # <-- CHANGED THIS LINE
+def load_events_for_dates(dates_list, df_ev): 
     event_map = {}
     try:
-        # df_ev = get_sheet_data(sheet_id, 'Events')  <-- DELETE THIS LINE
         if df_ev.empty: return event_map
 
         df_ev.columns = df_ev.columns.str.strip()
@@ -110,16 +109,19 @@ def load_events_for_dates(dates_list, df_ev): # <-- CHANGED THIS LINE
     except: pass
     return event_map
 
-def solve_rota_final_v14(sheet_id=None, target_weeks=None):
+def solve_rota_final_v14(sheet_id=None, target_weeks=None, username=None):
     if not sheet_id:
         raise ValueError("System Error: No Google Sheet ID was provided to the backend.")
+    if not username:
+        raise ValueError("System Error: No Username was provided to the backend. User data cannot be isolated.")
 
     run_event_tracker()
 
-    df_emp = get_sheet_data(sheet_id, "Employees")
-    df_shifts = get_sheet_data(sheet_id, "Shift Template") 
-    df_hol = get_sheet_data(sheet_id, "Holiday") 
-    df_events = get_sheet_data(sheet_id, "Events") # <-- ADD THIS LINE HERE
+    # --- ISOLATED MULTI-TENANT DATA FETCH ---
+    df_emp = get_user_data(sheet_id, "Employees", username)
+    df_shifts = get_user_data(sheet_id, "Shift Template", username) 
+    df_hol = get_user_data(sheet_id, "Holiday", username) 
+    df_events = get_user_data(sheet_id, "Events", username)
     
     if df_emp.empty: raise ValueError("No data found in the 'Employees' tab. Please add employees first.")
     if df_shifts.empty: raise ValueError("No data found in the 'Shift Template' tab. Please set up shift rules first.")
@@ -496,6 +498,6 @@ def solve_rota_final_v14(sheet_id=None, target_weeks=None):
     if weekly_dataframes:
         for week_num, df_week in weekly_dataframes.items():
             sheet_name = f"Rota_{week_num}"
-            write_sheet_data(sheet_id, sheet_name, df_week)
+            write_user_data(sheet_id, sheet_name, username, df_week)
     else:
         raise ValueError("Unknown Error: The solver finished but no Rota was generated.")
