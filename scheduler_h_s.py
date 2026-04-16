@@ -21,11 +21,9 @@ MAX_CONSECUTIVE_DAYS = 6
 
 # --- SOFT CONSTRAINT WEIGHTS ---
 WEIGHT_CONTRACT_VIOLATION = 1000000 
-WEIGHT_UTILIZATION = 10000          # High thirst for budget
-WEIGHT_EXTRA_FAIRNESS = 5000        # The "Spread" engine
-WEIGHT_FLAT_PENALTY = 10            # Discourages unnecessary bloat
-WEIGHT_PREFERRED_DAY = 200   
-WEIGHT_PREFERRED_SLOT = 100  
+WEIGHT_UTILIZATION = 10000          
+WEIGHT_EXTRA_FAIRNESS = 5000        
+WEIGHT_FLAT_PENALTY = 10            
 
 # ==============================================================================
 
@@ -33,7 +31,6 @@ def solve_rota_final_v14(sheet_id=None, target_weeks=None, username=None):
     if not sheet_id or not username:
         raise ValueError("Missing Sheet ID or Username.")
 
-    # 1. Fetch Data
     df_emp = get_user_data(sheet_id, "Employees", username)
     df_shifts = get_user_data(sheet_id, "Shift Template", username) 
     df_hol = get_user_data(sheet_id, "Holiday", username) 
@@ -60,7 +57,6 @@ def solve_rota_final_v14(sheet_id=None, target_weeks=None, username=None):
         dates_in_order = week_data['Date'].dt.strftime('%Y-%m-%d').unique()
         weekly_budget_hours = int(week_data['Budget'].max()) if 'Budget' in week_data.columns else 9999
 
-        # Auto-override to prevent infeasibility if budget > physical slots
         total_physical_hours = sum(int(row['Maximum Employees']) * MAX_SHIFT_LENGTH for _, row in week_data.iterrows())
         daily_boost = math.ceil(max(0, weekly_budget_hours - total_physical_hours) / (len(week_data) * MAX_SHIFT_LENGTH)) if len(week_data) > 0 else 0
 
@@ -70,10 +66,11 @@ def solve_rota_final_v14(sheet_id=None, target_weeks=None, username=None):
         objective_terms = []
 
         for idx in emp_indices:
-            emp_week_hours = []
+            total_hours_vars = []
             for i, row in week_data.iterrows():
                 d_str = row['Date'].strftime('%Y-%m-%d')
-                s_h, e_h = pd.to_datetime(str(row['Start'])).hour, (24 if pd.to_datetime(str(row['End'])).hour == 0 else pd.to_datetime(str(row['End'])).hour)
+                s_h = pd.to_datetime(str(row['Start'])).hour
+                e_h = 24 if pd.to_datetime(str(row['End'])).hour == 0 else pd.to_datetime(str(row['End'])).hour
 
                 is_working_day[(idx, d_str)] = model.NewBoolVar(f'day_{idx}_{d_str}')
                 daily_start_hour[(idx, d_str)] = model.NewIntVar(0, 24, f'start_h_{idx}_{d_str}')
@@ -84,29 +81,23 @@ def solve_rota_final_v14(sheet_id=None, target_weeks=None, username=None):
                     work[(idx, d_str, h)] = w_var
                     start[(idx, d_str, h)] = model.NewBoolVar(f's_{idx}_{d_str}_{h}')
                     all_worked_hours_vars.append(w_var)
-                    emp_week_hours.append(w_var)
+                    total_hours_vars.append(w_var)
 
             emp = employees[idx]
-            o_min = int(emp.get('Minimum Contractual Hours', 0))
-            o_max = int(emp.get('Max Weekly Hours', 45))
+            o_min, o_max = int(emp.get('Minimum Contractual Hours', 0)), int(emp.get('Max Weekly Hours', 45))
             
             actual_h = model.NewIntVar(0, 100, f'actual_h_{idx}')
-            model.Add(actual_h == sum(emp_week_hours))
+            model.Add(actual_h == sum(total_hours_vars))
             
-            # --- CONTRACT ENFORCEMENT ---
             missing_h = model.NewIntVar(0, 100, f'missing_h_{idx}')
             model.Add(missing_h >= o_min - actual_h)
             objective_terms.append(-WEIGHT_CONTRACT_VIOLATION * missing_h)
             model.Add(actual_h <= o_max)
 
-            # --- FAIRNESS INTEGRATION (THE PART I MISSED) ---
             extra_h = model.NewIntVar(0, 100, f'extra_h_{idx}')
             model.Add(extra_h >= actual_h - o_min)
-            
             sq_extra_h = model.NewIntVar(0, 10000, f'sq_extra_{idx}')
             model.AddMultiplicationEquality(sq_extra_h, [extra_h, extra_h])
-            
-            # Use the variables from the control panel
             objective_terms.append(-WEIGHT_EXTRA_FAIRNESS * sq_extra_h)
             objective_terms.append(-WEIGHT_FLAT_PENALTY * extra_h)
 
@@ -114,14 +105,20 @@ def solve_rota_final_v14(sheet_id=None, target_weeks=None, username=None):
 
         for i, row in week_data.iterrows():
             d_str = row['Date'].strftime('%Y-%m-%d')
-            s_h, e_h = pd.to_datetime(str(row['Start'])).hour, (24 if pd.to_datetime(str(row['End'])).hour == 0 else pd.to_datetime(str(row['End'])).hour)
+            s_h = pd.to_datetime(str(row['Start'])).hour
+            e_h = 24 if pd.to_datetime(str(row['End'])).hour == 0 else pd.to_datetime(str(row['End'])).hour
             m_max = int(row['Maximum Employees']) + daily_boost
+            m_closing = int(row.get('Minimum closing staff', 1))
             
             model.Add(sum(is_working_day[(idx, d_str)] for idx in emp_indices) <= m_max)
             
+            # Trained Opener
             trained_ids = [idx for idx in emp_indices if employees[idx].get('Opening Trained') == 'Yes']
             if trained_ids:
                 model.Add(sum(work[(idx, d_str, s_h)] for idx in trained_ids) >= 1)
+
+            # Minimum Closing Staff (Final hour of business)
+            model.Add(sum(work[(idx, d_str, e_h - 1)] for idx in emp_indices) >= m_closing)
 
             for idx in emp_indices:
                 h_vars = [work[(idx, d_str, h)] for h in range(s_h, e_h)]
@@ -142,16 +139,15 @@ def solve_rota_final_v14(sheet_id=None, target_weeks=None, username=None):
 
         solver = cp_model.CpSolver()
         solver.parameters.max_time_in_seconds = 60.0
-        status = solver.Solve(model)
-
-        if status in (cp_model.OPTIMAL, cp_model.FEASIBLE):
+        if solver.Solve(model) in (cp_model.OPTIMAL, cp_model.FEASIBLE):
             res = []
             for idx in emp_indices:
                 rd = {'Name': employees[idx]['Name'], 'Total Weekly Hours': 0}
                 for _, row in week_data.iterrows():
                     d_s = row['Date'].strftime('%Y-%m-%d')
-                    h_r = range(pd.to_datetime(str(row['Start'])).hour, (24 if pd.to_datetime(str(row['End'])).hour == 0 else pd.to_datetime(str(row['End'])).hour))
-                    shift_h = [h for h in h_r if solver.Value(work[(idx, d_s, h)])]
+                    s_h = pd.to_datetime(str(row['Start'])).hour
+                    e_h = 24 if pd.to_datetime(str(row['End'])).hour == 0 else pd.to_datetime(str(row['End'])).hour
+                    shift_h = [h for h in range(s_h, e_h) if solver.Value(work[(idx, d_s, h)])]
                     col = f"{d_s} ({row['Date'].day_name()[:3]})"
                     if shift_h:
                         rd[col] = f"{min(shift_h):02d}:00 - {max(shift_h)+1:02d}:00"
@@ -159,8 +155,6 @@ def solve_rota_final_v14(sheet_id=None, target_weeks=None, username=None):
                     else: rd[col] = "OFF"
                 res.append(rd)
             weekly_dataframes[week] = pd.DataFrame(res)
-        else:
-            raise ValueError(f"Infeasible week {week}. Budget vs Max Headcount conflict.")
 
     for wk_n, df_w in weekly_dataframes.items():
         write_user_data(sheet_id, f"Rota_{wk_n}", username, df_w)
