@@ -49,8 +49,8 @@ MORNING_END_HOUR = 12
 # --- SOFT CONSTRAINT WEIGHTS ---
 # Utilization is the king: AI will spend the money first.
 # Fairness is the queen: AI will ensure the spending is flat across ALL staff.
-WEIGHT_UTILIZATION = 10000   
-WEIGHT_TOTAL_FAIRNESS = 100  # Penalty for total hours worked (Square)
+WEIGHT_UTILIZATION = 500   
+WEIGHT_TOTAL_FAIRNESS = 1000  # Penalty for total hours worked (Square)
 WEIGHT_PREFERRED_DAY = 200   
 WEIGHT_PREFERRED_SLOT = 100  
 
