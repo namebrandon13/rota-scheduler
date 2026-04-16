@@ -10,12 +10,13 @@ from gsheets_db import get_user_data, write_user_data
 # AUTH & SETUP
 # ======================================================
 
-# Verify user is logged in and has a sheet ID assigned
-if 'sheet_id' not in st.session_state:
+# Verify user is logged in and has a sheet ID AND username assigned
+if 'sheet_id' not in st.session_state or 'username' not in st.session_state:
     st.error("Please log in to access the Employees Management.")
     st.stop()
 
 sheet_id = st.session_state['sheet_id']
+username = st.session_state['username']
 SHEET_NAME = "Employees"
 
 # ======================================================
@@ -94,10 +95,11 @@ if 'edit_emp_id' not in st.session_state:
 # ======================================================
 
 @st.cache_data(ttl=10)
-def load_employees():
-    """Load employees from Google Sheets."""
+def load_employees(user):
+    """Load employees from Google Sheets for the specific user."""
     try:
-        df = get_sheet_data(sheet_id, SHEET_NAME)
+        # Changed to get_user_data
+        df = get_user_data(sheet_id, SHEET_NAME, user)
         if not df.empty:
             df.columns = df.columns.str.strip()
         return df
@@ -106,11 +108,12 @@ def load_employees():
         return pd.DataFrame()
 
 
-def save_employees(df):
+def save_employees(df, user):
     """Save employees back to Google Sheets. 
-    (write_sheet_data handles isolated tab updates automatically)"""
+    (write_user_data handles isolated tab updates automatically)"""
     try:
-        write_sheet_data(sheet_id, SHEET_NAME, df)
+        # Changed to write_user_data
+        write_user_data(sheet_id, SHEET_NAME, user, df)
         st.cache_data.clear()
         return True
     except Exception as e:
@@ -139,7 +142,7 @@ def nav_to(view, emp_id=None):
 # ======================================================
 
 def render_sidebar():
-    df = load_employees()
+    df = load_employees(username)
     
     with st.sidebar:
         st.markdown("### 👥 Employees")
@@ -173,11 +176,12 @@ def show_list_view():
     st.markdown("<div class='page-title'>👥 Employees</div>", unsafe_allow_html=True)
     st.markdown("<div class='page-sub'>Manage staff details, availability, and preferences</div>", unsafe_allow_html=True)
     
-    df = load_employees()
+    df = load_employees(username)
     
     if df.empty:
         st.warning("No employee data found.")
-        return
+        # Provide an empty dataframe so the "Add Employee" button still works to build off of
+        df = pd.DataFrame(columns=['ID', 'Name', 'Designation', 'Minimum Contractual Hours', 'Max Weekly Hours'])
     
     # Action buttons
     col1, col2, col3 = st.columns([1, 1, 4])
@@ -190,6 +194,9 @@ def show_list_view():
     
     st.divider()
     
+    if df.empty:
+        return
+
     # Search and filter
     fc1, fc2, fc3 = st.columns([2, 1, 1])
     
@@ -304,7 +311,7 @@ def show_table_view():
     
     st.divider()
     
-    df = load_employees()
+    df = load_employees(username)
     
     if df.empty:
         st.warning("No employee data found.")
@@ -364,7 +371,7 @@ def show_table_view():
     c1, c2 = st.columns(2)
     with c1:
         if st.button("💾 Save Changes", type="primary", use_container_width=True):
-            if save_employees(edited_df):
+            if save_employees(edited_df, username):
                 st.success("✅ Saved successfully!")
                 st.rerun()
     
@@ -377,14 +384,14 @@ def show_table_view():
 # ======================================================
 
 def show_edit_view():
-    df = load_employees()
+    df = load_employees(username)
     emp_id = st.session_state.edit_emp_id
     is_new = emp_id is None
     
     if is_new:
         st.markdown("<div class='page-title'>➕ Add Employee</div>", unsafe_allow_html=True)
         emp = {}
-        new_id = int(df['ID'].max()) + 1 if not df.empty else 1
+        new_id = int(df['ID'].max()) + 1 if not df.empty and 'ID' in df.columns else 1
     else:
         st.markdown("<div class='page-title'>✏️ Edit Employee</div>", unsafe_allow_html=True)
         emp_row = df[df['ID'] == emp_id]
@@ -576,13 +583,13 @@ def show_edit_view():
             for col, val in new_emp.items():
                 df.loc[df['ID'] == emp_id, col] = val
         
-        if save_employees(df):
+        if save_employees(df, username):
             st.success("✅ Employee saved!")
             nav_to('list')
     
     if delete:
         df = df[df['ID'] != emp_id]
-        if save_employees(df):
+        if save_employees(df, username):
             st.success("✅ Employee deleted!")
             nav_to('list')
 
