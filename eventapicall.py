@@ -333,7 +333,8 @@ def parse_ics_feed(start_date, end_date):
 #                               MAIN SCAN FUNCTION
 # ==============================================================================
 
-def run_event_scan(start_date=None, end_date=None, merge=True):
+def run_event_scan(sheet_id, username, start_date=None, end_date=None, merge=True):
+    biz_lat, biz_lon = get_dynamic_location(sheet_id, username)
     """
     Run event scan for a specific date range.
     
