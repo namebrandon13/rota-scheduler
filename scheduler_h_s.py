@@ -53,71 +53,52 @@ WEIGHT_PREFERRED_SLOT = 5
 # ==============================================================================
 
 def get_event_params(impact_score):
-    if impact_score >= 8:
-        return EVENT_THRESHOLDS[8]
-    elif impact_score >= 5:
-        return EVENT_THRESHOLDS[5]
-    elif impact_score >= 1:
-        return EVENT_THRESHOLDS[1]
+    if impact_score >= 8: return EVENT_THRESHOLDS[8]
+    elif impact_score >= 5: return EVENT_THRESHOLDS[5]
+    elif impact_score >= 1: return EVENT_THRESHOLDS[1]
     return EVENT_THRESHOLDS[0]
 
 def parse_fixed_shifts(raw):
     result = {}
     raw = str(raw).strip()
-
-    if raw in ["", "nan", "None"]:
-        return result
+    if raw in ["", "nan", "None"]: return result
 
     for item in raw.split(";"):
         parts = item.split("|")
-        if len(parts) != 3:
-            continue
-
+        if len(parts) != 3: continue
         day_name = parts[0].strip()
         try:
             start_h = int(parts[1].split(":")[0])
             end_h = int(parts[2].split(":")[0])
-            if end_h == 0:
-                end_h = 24
+            if end_h == 0: end_h = 24
             result[day_name] = (start_h, end_h)
-        except:
-            pass
-
+        except: pass
     return result
 
 def run_event_tracker():
     try:
         if os.path.exists(EVENT_SCRIPT):
             subprocess.run([sys.executable, EVENT_SCRIPT], capture_output=True, text=True, cwd=BASE_DIR)
-    except Exception:
-        pass
+    except: pass
 
 def load_events_for_dates(dates_list, sheet_id):
     event_map = {}
     try:
         df_ev = get_sheet_data(sheet_id, 'Events')
-        if df_ev.empty:
-            return event_map
+        if df_ev.empty: return event_map
 
         df_ev.columns = df_ev.columns.str.strip()
-        
         for _, row in df_ev.iterrows():
             try:
                 d_str = pd.to_datetime(row['Date']).strftime('%Y-%m-%d')
-                if d_str not in dates_list:
-                    continue
+                if d_str not in dates_list: continue
                 
                 start_time = str(row.get('Start Time', '12:00'))
                 try:
-                    if ':' in start_time:
-                        start_hour = int(start_time.split(':')[0])
-                    else:
-                        start_hour = 12 
-                except:
-                    start_hour = 12
+                    start_hour = int(start_time.split(':')[0]) if ':' in start_time else 12 
+                except: start_hour = 12
                 
                 impact = int(row.get('Impact Score', 0))
-                
                 if d_str not in event_map or impact > event_map[d_str]['impact']:
                     event_map[d_str] = {
                         'impact': impact,
@@ -125,11 +106,8 @@ def load_events_for_dates(dates_list, sheet_id):
                         'event_name': str(row.get('Event Name', 'Event')),
                         'venue': str(row.get('Venue', ''))
                     }
-            except:
-                continue
-    except:
-        pass
-    
+            except: continue
+    except: pass
     return event_map
 
 def solve_rota_final_v14(sheet_id=None, target_weeks=None):
@@ -140,31 +118,36 @@ def solve_rota_final_v14(sheet_id=None, target_weeks=None):
 
     df_emp = get_sheet_data(sheet_id, "Employees")
     df_shifts = get_sheet_data(sheet_id, "Shift Template") 
-    df_hol = get_sheet_data(sheet_id, "Holidays") 
+    df_hol = get_sheet_data(sheet_id, "Holiday") 
     
-    # 🔴 ERROR TRAP 1: Missing Data in Google Sheets
-    if df_emp.empty:
-        raise ValueError("No data found in the 'Employees' tab. Please add employees first.")
-    if df_shifts.empty:
-        raise ValueError("No data found in the 'Shift Templates' tab. Please set up shift rules first.")
+    if df_emp.empty: raise ValueError("No data found in the 'Employees' tab. Please add employees first.")
+    if df_shifts.empty: raise ValueError("No data found in the 'Shift Template' tab. Please set up shift rules first.")
 
     df_shifts.columns = df_shifts.columns.str.strip()
     df_emp.columns = df_emp.columns.str.strip()
     
     df_shifts['Date'] = pd.to_datetime(df_shifts['Date'])
+    
+    # CRITICAL CLEANUP: Ignore any duplicated days lurking in the Google sheet
+    df_shifts = df_shifts.sort_values("Date").drop_duplicates(subset=["Date"], keep="last")
 
     if 'Total Sales' not in df_shifts.columns:
         df_shifts['Total Sales'] = 0
 
     df_shifts['Week_Num'] = df_shifts['Date'].dt.isocalendar().week
-    df_shifts['Week_Start_Date'] = df_shifts['Date'].apply(lambda x: (x.date() - timedelta(days=x.weekday())))
+    
+    # Format Week_Start_Str strictly as string to prevent date matching bugs
+    df_shifts['Week_Start_Str'] = df_shifts['Date'].apply(
+        lambda x: (x.date() - timedelta(days=x.weekday())).strftime('%Y-%m-%d')
+    )
     
     if target_weeks:
-        df_shifts = df_shifts[df_shifts['Week_Start_Date'].isin(target_weeks)].copy()
+        # Convert incoming target weeks strictly to string formats
+        t_weeks_str = [x.strftime('%Y-%m-%d') if hasattr(x, 'strftime') else str(x) for x in target_weeks]
+        df_shifts = df_shifts[df_shifts['Week_Start_Str'].isin(t_weeks_str)].copy()
 
-    # 🔴 ERROR TRAP 2: Date Filtering Wiped Out All Data
     if df_shifts.empty:
-        raise ValueError(f"No shift template data found for the selected week: {target_weeks[0].strftime('%d %b %Y')}. Ensure the dates in the 'Shift Templates' tab match the calendar.")
+        raise ValueError(f"No shift template data found for the selected week. Ensure the dates in the 'Shift Template' tab match the calendar.")
 
     approved_holidays = set() 
     if not df_hol.empty:
@@ -182,8 +165,7 @@ def solve_rota_final_v14(sheet_id=None, target_weeks=None):
                     h_date = row['Date'].strftime('%Y-%m-%d')
                     h_id = str(row.get('Employee ID', row.get('Name', '')))
                     approved_holidays.add((h_id, h_date))
-        except:
-            pass
+        except: pass
 
     df_emp['ID'] = df_emp['ID'].astype(str)
     employees = df_emp.to_dict('index')
@@ -201,17 +183,11 @@ def solve_rota_final_v14(sheet_id=None, target_weeks=None):
         weekly_budget_hours = 9999
         if 'Budget' in week_data.columns:
             val = week_data['Budget'].max()
-            if not pd.isna(val) and val > 0:
-                weekly_budget_hours = int(val)
+            if not pd.isna(val) and val > 0: weekly_budget_hours = int(val)
 
         model = cp_model.CpModel()
         
-        work = {}           
-        start = {}          
-        is_working_day = {} 
-        daily_start_hour = {} 
-        daily_end_hour = {}   
-        
+        work, start, is_working_day, daily_start_hour, daily_end_hour = {}, {}, {}, {}, {}
         emp_indices = df_emp.index.tolist()
         all_worked_hours_vars = []
 
@@ -247,10 +223,8 @@ def solve_rota_final_v14(sheet_id=None, target_weeks=None):
                         day_name = date_obj.day_name()
 
                         if (emp_id, date_str) in approved_holidays: continue
-                        
                         unavailable = str(emp.get('Unavailable Days', ''))
                         if unavailable != 'nan' and day_name in unavailable: continue
-
                         if day_name not in fixed_map: continue
 
                         fixed_start, fixed_end = fixed_map[day_name]
@@ -264,10 +238,8 @@ def solve_rota_final_v14(sheet_id=None, target_weeks=None):
                         if fixed_end > fixed_start:
                             model.Add(is_working_day[(idx, date_str)] == 1)
                             for h in range(shop_start, shop_end):
-                                if fixed_start <= h < fixed_end:
-                                    model.Add(work[(idx, date_str, h)] == 1)
-                                else:
-                                    model.Add(work[(idx, date_str, h)] == 0)
+                                if fixed_start <= h < fixed_end: model.Add(work[(idx, date_str, h)] == 1)
+                                else: model.Add(work[(idx, date_str, h)] == 0)
 
         for idx in emp_indices:
             emp_id = employees[idx]['ID']
@@ -278,8 +250,7 @@ def solve_rota_final_v14(sheet_id=None, target_weeks=None):
                     start_h = pd.to_datetime(str(row['Start'])).hour
                     end_h = pd.to_datetime(str(row['End'])).hour
                     if end_h == 0: end_h = 24
-                    for h in range(start_h, end_h):
-                        model.Add(work[(idx, date_str, h)] == 0)
+                    for h in range(start_h, end_h): model.Add(work[(idx, date_str, h)] == 0)
 
         for idx in emp_indices:
             emp = employees[idx]
@@ -292,20 +263,15 @@ def solve_rota_final_v14(sheet_id=None, target_weeks=None):
                 day_name = pd.to_datetime(d).day_name()
                 is_holiday = (emp_id, d) in approved_holidays or (emp_name, d) in approved_holidays
                 is_unavailable = (unavailable_str != 'nan' and day_name in unavailable_str)
-                if not is_holiday and not is_unavailable:
-                    available_days_count += 1
+                if not is_holiday and not is_unavailable: available_days_count += 1
             
             max_physical_capacity = available_days_count * MAX_SHIFT_LENGTH
             
             try:
-                if 'Minimum Contractual Hours' in emp:
-                    original_min = int(emp['Minimum Contractual Hours'])
-                elif 'Minimum Contractual Hours ' in emp:
-                    original_min = int(emp['Minimum Contractual Hours '])
-                else:
-                    original_min = 0 
-            except:
-                original_min = 0
+                if 'Minimum Contractual Hours' in emp: original_min = int(emp['Minimum Contractual Hours'])
+                elif 'Minimum Contractual Hours ' in emp: original_min = int(emp['Minimum Contractual Hours '])
+                else: original_min = 0 
+            except: original_min = 0
 
             adjusted_min = min(original_min, max_physical_capacity)
             original_max = int(emp.get('Max Weekly Hours', 40))
@@ -313,10 +279,7 @@ def solve_rota_final_v14(sheet_id=None, target_weeks=None):
             total_hours_vars = [
                 work[(idx, row['Date'].strftime('%Y-%m-%d'), h)] 
                 for _, row in week_data.iterrows() 
-                for h in range(
-                    pd.to_datetime(str(row['Start'])).hour, 
-                    24 if pd.to_datetime(str(row['End'])).hour == 0 else pd.to_datetime(str(row['End'])).hour
-                )
+                for h in range(pd.to_datetime(str(row['Start'])).hour, 24 if pd.to_datetime(str(row['End'])).hour == 0 else pd.to_datetime(str(row['End'])).hour)
             ]
             
             model.Add(sum(total_hours_vars) >= adjusted_min)
@@ -337,8 +300,7 @@ def solve_rota_final_v14(sheet_id=None, target_weeks=None):
                 model.Add(sum(work[(idx, date_str, h)] for h in hours_range) == 0).OnlyEnforceIf(is_working_day[(idx, date_str)].Not())
                 
                 for h in hours_range:
-                    if h == start_h:
-                        model.Add(start[(idx, date_str, h)] == work[(idx, date_str, h)])
+                    if h == start_h: model.Add(start[(idx, date_str, h)] == work[(idx, date_str, h)])
                     else:
                         model.Add(work[(idx, date_str, h)] >= start[(idx, date_str, h)])
                         model.Add(start[(idx, date_str, h)] >= work[(idx, date_str, h)] - work[(idx, date_str, h-1)])
@@ -401,9 +363,7 @@ def solve_rota_final_v14(sheet_id=None, target_weeks=None):
             min_headcount = max(final_min_headcount, min_closing)
             
             manual_max = int(row['Maximum Employees'])
-            if min_headcount > manual_max:
-                min_headcount = manual_max
-            
+            if min_headcount > manual_max: min_headcount = manual_max
             max_headcount = manual_max  
 
             model.Add(sum(is_working_day[(idx, date_str)] for idx in emp_indices) >= min_headcount)
@@ -413,9 +373,7 @@ def solve_rota_final_v14(sheet_id=None, target_weeks=None):
             end_h = pd.to_datetime(str(row['End'])).hour
             if end_h == 0: end_h = 24
             
-            for h in range(start_h, end_h):
-                model.Add(sum(work[(idx, date_str, h)] for idx in emp_indices) >= 1)
-            
+            for h in range(start_h, end_h): model.Add(sum(work[(idx, date_str, h)] for idx in emp_indices) >= 1)
             last_hour = end_h - 1
             model.Add(sum(work[(idx, date_str, last_hour)] for idx in emp_indices) >= min_closing)
 
@@ -425,28 +383,22 @@ def solve_rota_final_v14(sheet_id=None, target_weeks=None):
                     if day_event and event_start_hour:
                         prep_hour = max(7, event_start_hour - EVENT_PREP_HOURS)
                         model.Add(sum(work[(idx, date_str, prep_hour)] for idx in emp_indices) >= min_rush_staff)
-                    else:
-                        model.Add(sum(work[(idx, date_str, 7)] for idx in emp_indices) >= 2)
+                    else: model.Add(sum(work[(idx, date_str, 7)] for idx in emp_indices) >= 2)
                         
                 elif start_h < second_start_earliest and end_h > second_start_latest and max_headcount >= 2:
-                    for h in range(start_h, second_start_earliest):
-                        model.Add(sum(work[(idx, date_str, h)] for idx in emp_indices) == 1)
+                    for h in range(start_h, second_start_earliest): model.Add(sum(work[(idx, date_str, h)] for idx in emp_indices) == 1)
                     model.Add(sum(work[(idx, date_str, second_start_latest)] for idx in emp_indices) >= 2)
-                    
                     if day_event and event_start_hour:
                         prep_hour = max(start_h, event_start_hour - EVENT_PREP_HOURS)
-                        for h in range(prep_hour, min(event_start_hour + 2, end_h)):
-                            model.Add(sum(work[(idx, date_str, h)] for idx in emp_indices) >= min_rush_staff)
+                        for h in range(prep_hour, min(event_start_hour + 2, end_h)): model.Add(sum(work[(idx, date_str, h)] for idx in emp_indices) >= min_rush_staff)
 
             if ENABLE_RUSH_LOCK:
                 operating_hours = list(range(start_h, end_h))
                 for k in range(1, len(operating_hours) - 1):
                     current_h = operating_hours[k]
                     prev_h = operating_hours[k-1]
-                    
                     current_staff = sum(work[(idx, date_str, current_h)] for idx in emp_indices)
                     prev_staff = sum(work[(idx, date_str, prev_h)] for idx in emp_indices)
-                    
                     rush_active = model.NewBoolVar(f'rush_active_{date_str}_{prev_h}')
                     model.Add(prev_staff >= DEFAULT_RUSH_TRIGGER).OnlyEnforceIf(rush_active)
                     model.Add(prev_staff < DEFAULT_RUSH_TRIGGER).OnlyEnforceIf(rush_active.Not())
@@ -463,8 +415,7 @@ def solve_rota_final_v14(sheet_id=None, target_weeks=None):
             unavailable_str = str(emp.get('Unavailable Days', ''))
             for i, row in week_data.iterrows():
                 date_str = row['Date'].strftime('%Y-%m-%d')
-                if unavailable_str != 'nan' and row['Date'].day_name() in unavailable_str:
-                    model.Add(is_working_day[(idx, date_str)] == 0)
+                if unavailable_str != 'nan' and row['Date'].day_name() in unavailable_str: model.Add(is_working_day[(idx, date_str)] == 0)
 
         objective_terms = []
         for idx in emp_indices:
@@ -472,8 +423,7 @@ def solve_rota_final_v14(sheet_id=None, target_weeks=None):
             pref_day = str(emp.get('Preferred Day', ''))
             for i, row in week_data.iterrows():
                 date_str = row['Date'].strftime('%Y-%m-%d')
-                if pref_day != 'nan' and row['Date'].day_name() in pref_day:
-                    objective_terms.append(WEIGHT_PREFERRED_DAY * is_working_day[(idx, date_str)])
+                if pref_day != 'nan' and row['Date'].day_name() in pref_day: objective_terms.append(WEIGHT_PREFERRED_DAY * is_working_day[(idx, date_str)])
             
             pref_slot = str(emp.get('Preferred slot', ''))
             if pref_slot not in ['nan', 'None', 'Any', '']:
@@ -524,15 +474,12 @@ def solve_rota_final_v14(sheet_id=None, target_weeks=None):
                             weekly_h += 1
                     
                     col_key = f"{date_str} ({row['Date'].day_name()[:3]})"
-                    if shift_start is not None:
-                        row_data[col_key] = f"{shift_start:02d}:00 - {shift_end:02d}:00"
+                    if shift_start is not None: row_data[col_key] = f"{shift_start:02d}:00 - {shift_end:02d}:00"
                     else:
                         emp_id = str(employees[idx]['ID']).strip()
                         emp_name = str(employees[idx]['Name']).strip()
-                        if (emp_id, date_str) in approved_holidays or (emp_name, date_str) in approved_holidays:
-                            row_data[col_key] = "Holiday"
-                        else:
-                            row_data[col_key] = "OFF"
+                        if (emp_id, date_str) in approved_holidays or (emp_name, date_str) in approved_holidays: row_data[col_key] = "Holiday"
+                        else: row_data[col_key] = "OFF"
                 
                 row_data['Total Weekly Hours'] = weekly_h
                 current_week_results.append(row_data)
@@ -543,7 +490,6 @@ def solve_rota_final_v14(sheet_id=None, target_weeks=None):
             weekly_dataframes[week] = df_week
             
         else:
-            # 🔴 ERROR TRAP 3: AI failed to solve math
             raise ValueError(f"The AI could not find a mathematically possible schedule for Week {week}. Check your constraints (is the budget too low? Are there too many overlapping unavailable days?)")
 
     if weekly_dataframes:
@@ -551,5 +497,4 @@ def solve_rota_final_v14(sheet_id=None, target_weeks=None):
             sheet_name = f"Rota_{week_num}"
             write_sheet_data(sheet_id, sheet_name, df_week)
     else:
-        # 🔴 ERROR TRAP 4: Safety catch
         raise ValueError("Unknown Error: The solver finished but no Rota was generated.")
