@@ -71,3 +71,64 @@ def write_sheet_data(sheet_id, worksheet_name, df):
         print(f"CRITICAL WRITE ERROR: {e}")
         st.error(f"Google Sheets Upload Failed: {e}")
         raise e
+# ... (Keep all your existing code at the top of gsheets_db.py) ...
+
+def get_user_database():
+    """Reads the master user database from Google Sheets."""
+    master_id = st.secrets["master_db_sheet_id"]
+    df = get_sheet_data(master_id, "Users")
+    if df.empty:
+        return {}
+    
+    # Convert dataframe to a dictionary for easy login checking
+    users = {}
+    for _, row in df.iterrows():
+        users[str(row['Username'])] = {
+            "password": str(row['Password']),
+            "sheet_id": str(row['Sheet_ID'])
+        }
+    return users
+
+def create_new_user_sheet(username):
+    """
+    Creates a brand new Google Sheet for the user, shares it with the admin, 
+    and sets up the default tabs. Returns the new Sheet ID.
+    """
+    client = get_gspread_client()
+    admin_email = st.secrets["admin_email"]
+    file_name = f"Rota_Scheduler_{username}"
+    
+    print(f"Creating new Google Sheet: {file_name}...")
+    
+    # 1. Create the new file in the Service Account's Drive
+    new_sheet = client.create(file_name)
+    new_sheet_id = new_sheet.id
+    
+    # 2. Share it with the human admin so you can see it!
+    new_sheet.share(admin_email, perm_type='user', role='writer')
+    
+    # 3. Create the required tabs
+    tabs_to_create = ["Employees", "Shift Template", "Holiday", "Events"]
+    for tab in tabs_to_create:
+        new_sheet.add_worksheet(title=tab, rows="100", cols="20")
+    
+    # 4. Delete the default "Sheet1" that Google makes automatically
+    try:
+        sheet1 = new_sheet.worksheet("Sheet1")
+        new_sheet.del_worksheet(sheet1)
+    except:
+        pass
+        
+    return new_sheet_id
+
+def register_user_in_db(username, hashed_password, new_sheet_id):
+    """Appends the new user to the Master Google Sheet database."""
+    master_id = st.secrets["master_db_sheet_id"]
+    client = get_gspread_client()
+    
+    sh = client.open_by_key(master_id)
+    worksheet = sh.worksheet("Users")
+    
+    # Add a new row to the bottom of the "Users" tab
+    new_row = [username, hashed_password, new_sheet_id]
+    worksheet.append_row(new_row)
