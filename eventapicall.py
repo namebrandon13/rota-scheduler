@@ -288,22 +288,27 @@ def get_ticketmaster_events(start_date, end_date, biz_lat, biz_lon):
 # ==============================================================================
 
 def run_event_scan(sheet_id, username, start_date=None, end_date=None, merge=True):
-    biz_lat, biz_lon = get_dynamic_location(sheet_id, username)
+    # STATIC LOCATION: Bypassing Google Sheets database lookup
+    biz_lat = BUSINESS_LAT
+    biz_lon = BUSINESS_LONG
+    
     print("--- STARTING EVENT SCAN ---")
     
+    # Set default dates
     today = date.today()
     if start_date is None:
         start_date = today.strftime('%Y-%m-%d')
     if end_date is None:
         end_date = (today + timedelta(days=30)).strftime('%Y-%m-%d')
     
+    # Ensure we don't scan past dates
     start_dt = datetime.strptime(start_date, '%Y-%m-%d').date()
     if start_dt < today:
         start_date = today.strftime('%Y-%m-%d')
     
     print(f"  Scan Range: {start_date} to {end_date}")
     
-    # Pass dynamic coordinates into APIs
+    # Pass static coordinates into APIs
     tm = get_ticketmaster_events(start_date, end_date, biz_lat, biz_lon)
     ics = parse_ics_feed(start_date, end_date)
     eb = scrape_eventbrite(start_date, end_date, biz_lat, biz_lon)
@@ -316,20 +321,27 @@ def run_event_scan(sheet_id, username, start_date=None, end_date=None, merge=Tru
 
     df = pd.DataFrame(all_events)
     
-    # Calculate distance using dynamic coordinates
+    # Calculate distance using static coordinates
     df['Distance (Miles)'] = df.apply(
         lambda x: haversine_distance(biz_lat, biz_lon, x['Lat'], x['Lon']), 
         axis=1
     )
     
+    # Filter by radius
     df = df[df['Distance (Miles)'] <= RADIUS_MILES]
+    
+    # Calculate impact
     df['Impact Score'] = df.apply(calculate_weighted_impact, axis=1)
     
+    # Filter by minimum impact
     initial_count = len(df)
     df = df[df['Impact Score'] >= MIN_IMPACT_THRESHOLD]
     dropped_count = initial_count - len(df)
+    
+    # Remove duplicates
     df = df.drop_duplicates(subset=['Date', 'Event Name'])
     
+    # Save (merge or replace)
     if not df.empty:
         save_events(df, merge=merge)
     
