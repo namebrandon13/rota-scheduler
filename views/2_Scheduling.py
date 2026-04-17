@@ -464,7 +464,7 @@ def show_add_view():
         rows.append({
             "Date": pd.Timestamp(day_date),
             "Start": time(7, 0),
-            "End": time(22, 0),
+            "End": time(00, 0),
             "Minimum Staff": ai_min,
             "Maximum Employees": ai_max,
             "Minimum closing staff": ai_close
