@@ -147,7 +147,7 @@ with c1:
         if scan_live:
             with st.spinner("Scanning today + 30 days & syncing to cloud..."):
                 try:
-                    result = scan_live(30)  # Scan today + 30 days
+                    result = scan_live(sheet_id, username, 30)  # Scan today + 30 days
                     if result is not None and not result.empty:
                         # Upload directly to Google Sheets, tied to this username
                         df_upload = result.copy()
