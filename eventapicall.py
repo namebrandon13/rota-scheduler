@@ -287,8 +287,12 @@ def get_ticketmaster_events(start_date, end_date, biz_lat, biz_lon):
 #                               MAIN SCAN FUNCTION
 # ==============================================================================
 
+# ==============================================================================
+#                               MAIN SCAN FUNCTION
+# ==============================================================================
+
 def run_event_scan(sheet_id, username, start_date=None, end_date=None, merge=True):
-    # STATIC LOCATION: Bypassing Google Sheets database lookup
+    # STATIC LOCATION: Completely bypassing Google Sheets database lookup
     biz_lat = BUSINESS_LAT
     biz_lon = BUSINESS_LONG
     
