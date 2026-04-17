@@ -1,846 +1,563 @@
-import streamlit as st
 import pandas as pd
+from ortools.sat.python import cp_model
+from datetime import datetime, timedelta
 import os
-import calendar
-from datetime import datetime, date, time, timedelta
-import pydeck as pdk
 import math
+import subprocess
+import sys
 
 # Import your new database handler
 from gsheets_db import get_user_data, write_user_data
 
-# ======================================================
-# AUTH & SETUP
-# ======================================================
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+EVENT_SCRIPT = os.path.join(BASE_DIR, "eventapicall.py")
 
-# Verify user is logged in and has a sheet ID AND username assigned
-if 'sheet_id' not in st.session_state or 'username' not in st.session_state:
-    st.error("Please log in to access the Scheduling Management.")
-    st.stop()
+# ==============================================================================
+#                            BUSINESS CONTROL PANEL
+# ==============================================================================
 
-sheet_id = st.session_state['sheet_id']
-username = st.session_state['username']
-SHEET_TEMPLATE = "Shift Template"
-SHEET_EVENTS = "Events"
-SHEET_EMPLOYEES = "Employees" # Added to fetch contract hours
+ENABLE_HYBRID_MODE = True
+REVENUE_PER_STAFF = 800   
 
-BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-
-# ======================================================
-# IMPORT EVENT SCANNER
-# ======================================================
-
-try:
-    from eventapicall import scan_week
-except:
-    scan_week = None
-
-# ======================================================
-# STYLE
-# ======================================================
-
-SHARED_CSS = """
-<style>
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&display=swap');
-html,body,[class*="css"]{font-family:'Inter',sans-serif;}
-.page-title{font-size:2em;font-weight:900;color:#1E293B;}
-.page-sub{font-size:0.88em;color:#64748B;margin-bottom:14px;}
-div[data-testid="stButton"]>button{border-radius:8px;font-weight:600;}
-div[data-testid="stMetric"]{
-    background:white;
-    border:1px solid #E2E8F0;
-    border-radius:12px;
-    padding:14px;
-}
-.cal-cell{
-    border-radius:14px;
-    padding:14px 6px 8px;
-    text-align:center;
-    min-height:125px;
-    border:1px solid #E2E8F0;
-    background:white;
-}
-.cell-sched{background:#EFF6FF;border-color:#BFDBFE;}
-.cell-empty{background:#F8FAFC;}
-.day-num{font-size:2.5em;font-weight:900;}
-.day-badge{
-    display:inline-block;
-    padding:3px 10px;
-    border-radius:20px;
-    font-size:0.82em;
-    font-weight:700;
-}
-.badge-sched{background:#2563EB;color:white;}
-.badge-empty{background:#E5E7EB;color:#64748B;}
-.event-alert{
-    background:#FEF3C7;
-    border:1px solid #F59E0B;
-    border-radius:12px;
-    padding:12px 16px;
-    margin:8px 0;
-}
-.event-high{
-    background:#FEE2E2;
-    border-color:#DC2626;
-}
-.calendar-box{
-    border:1px solid #E5E7EB;
-    border-radius:10px;
-    padding:8px;
-    min-height:80px;
-    background:white;
-    text-align:center;
-}
-.calendar-box .day-number{
-    font-size:1.3rem;
-    font-weight:800;
-    margin-bottom:4px;
-}
-</style>
-"""
-st.markdown(SHARED_CSS, unsafe_allow_html=True)
-
-# ======================================================
-# SESSION
-# ======================================================
-
-defaults = {
-    "sched_view": "calendar",
-    "sched_yr": datetime.today().year,
-    "sched_mo": datetime.today().month,
-    "sched_ws": None,
-    "week_events": None,
-    "events_scanned": False
-}
-
-for k, v in defaults.items():
-    if k not in st.session_state:
-        st.session_state[k] = v
-
-# ======================================================
-# HELPERS
-# ======================================================
-
-def get_week_start(d):
-    if isinstance(d, datetime):
-        d = d.date()
-    elif isinstance(d, pd.Timestamp):
-        d = d.date()
-    return d - timedelta(days=d.weekday())
-
-@st.cache_data(ttl=10)
-def load_all(user):
-    try:
-        df = get_user_data(sheet_id, SHEET_TEMPLATE, user)
-        if df.empty:
-            return pd.DataFrame()
-            
-        df.columns = df.columns.str.strip()
-        df["Date"] = pd.to_datetime(df["Date"])
-        for col in ["Start", "End"]:
-            try:
-                df[col] = pd.to_datetime(df[col].astype(str)).dt.time
-            except:
-                pass
-        return df
-    except Exception as e:
-        st.error(f"Error loading schedule: {e}")
-        return pd.DataFrame()
-
-def load_events_for_week(ws, user):
-    try:
-        df = get_user_data(sheet_id, SHEET_EVENTS, user)
-        if df.empty:
-            return pd.DataFrame()
-            
-        df['Date'] = pd.to_datetime(df['Date']).dt.date
-        we = ws + timedelta(days=6)
-        df = df[(df['Date'] >= ws) & (df['Date'] <= we)]
-        return df.sort_values('Date')
-    except Exception as e:
-        st.error(f"Error loading events: {e}")
-        return pd.DataFrame()
-
-@st.cache_data(ttl=10)
-def get_required_shifts(user):
-    """Calculates the absolute minimum shifts required across all employees."""
-    try:
-        df = get_user_data(sheet_id, SHEET_EMPLOYEES, user)
-        if df.empty: return 0
-        
-        def calc_shifts(hrs):
-            try:
-                h = float(hrs)
-                if pd.isna(h): return 0
-                return math.ceil(h / 9.0) # Assuming 9 is MAX_SHIFT_LENGTH
-            except: return 0
-        
-        if 'Minimum Contractual Hours' in df.columns:
-            return sum(df['Minimum Contractual Hours'].apply(calc_shifts))
-        return 0
-    except:
-        return 0
-
-# ==============================================================
-#              SMART SUGGESTION ENGINE
-# ==============================================================
-
-# Day-of-week retail traffic weights (normalized so sum ≈ 7.0)
-# Derived from typical UK high-street footfall patterns
-_RAW_DOW = {
-    0: 0.80,   # Monday     — quiet recovery day
-    1: 0.80,   # Tuesday    — still slow
-    2: 0.85,   # Wednesday  — midweek uptick
-    3: 0.90,   # Thursday   — late-night shopping in some areas
-    4: 1.10,   # Friday     — pre-weekend rush
-    5: 1.30,   # Saturday   — peak retail day
-    6: 1.00,   # Sunday     — moderate (shorter hours too)
-}
-_DOW_SUM = sum(_RAW_DOW.values())
-DOW_WEIGHTS = {k: v * 7.0 / _DOW_SUM for k, v in _RAW_DOW.items()}
-
-AVG_SHIFT_LENGTH = 7.5   # midpoint of 6-9 hour shifts
 MIN_SHIFT_LENGTH = 6
 MAX_SHIFT_LENGTH = 9
+MIN_REST_HOURS = 12
+MAX_CONSECUTIVE_DAYS = 6
 
-def build_smart_suggestions(ws, user):
-    """
-    Analyses the full workforce picture and returns intelligent per-day
-    staffing suggestions plus a recommended weekly budget.
-    
-    Uses: employee roster, contracts, availability, holidays, events,
-    fixed shifts, daily availability windows, and day-of-week patterns.
-    """
+# --- DEFAULT VALUES (No Event) ---
+ENABLE_STRICT_SECOND_START = True
+DEFAULT_SECOND_START_EARLIEST = 9   
+DEFAULT_SECOND_START_LATEST = 10    
 
-    # ── 1. LOAD ALL DATA ──────────────────────────────────
-    emp_df = get_user_data(sheet_id, SHEET_EMPLOYEES, user)
-    if emp_df.empty:
-        return None
-    emp_df.columns = emp_df.columns.str.strip()
-    
-    total_staff = len(emp_df)
-    
-    # Contractual totals
-    emp_df['_min_hrs'] = pd.to_numeric(emp_df.get('Minimum Contractual Hours', 0), errors='coerce').fillna(0)
-    emp_df['_max_hrs'] = pd.to_numeric(emp_df.get('Max Weekly Hours', 40), errors='coerce').fillna(40)
-    total_min_hours = float(emp_df['_min_hrs'].sum())
-    total_max_hours = float(emp_df['_max_hrs'].sum())
-    
-    # Full-time vs part-time split (heuristic: ≥ 30h = full-time)
-    ft_count = int((emp_df['_min_hrs'] >= 30).sum())
-    pt_count = total_staff - ft_count
-    
-    # Openers
-    opener_count = 0
-    if 'Opening Trained' in emp_df.columns:
-        opener_count = int(emp_df['Opening Trained'].eq('Yes').sum())
-    
-    # ── 2. LOAD HOLIDAYS FOR THIS WEEK ────────────────────
-    hol_df = get_user_data(sheet_id, "Holiday", user)
-    holidays_by_date = {}   # date -> set of names/IDs on holiday
-    if not hol_df.empty:
+ENABLE_RUSH_LOCK = True 
+DEFAULT_RUSH_TRIGGER = 2
+DEFAULT_MIN_RUSH_STAFF = 2
+
+# --- EVENT-BASED OVERRIDES ---
+EVENT_PREP_HOURS = 4
+
+EVENT_THRESHOLDS = {
+    8: (7, 8, 4),   # High impact (8-10)
+    5: (8, 9, 3),   # Medium impact (5-7)
+    1: (9, 10, 2),  # Low impact (1-4)
+    0: (9, 10, 2),  # No event / default
+}
+
+EVENING_START_HOUR = 17 
+MORNING_END_HOUR = 12    
+
+# --- SOFT CONSTRAINT WEIGHTS ---
+# Scaled up significantly to allow the Fairness Penalty to act as a tie-breaker
+WEIGHT_UTILIZATION = 10
+WEIGHT_PREFERRED_DAY = 100      
+WEIGHT_PREFERRED_SLOT = 50      
+WEIGHT_FAIRNESS = 1 # Quadratic load balancer
+
+# ==============================================================================
+
+def get_event_params(impact_score):
+    if impact_score >= 8: return EVENT_THRESHOLDS[8]
+    elif impact_score >= 5: return EVENT_THRESHOLDS[5]
+    elif impact_score >= 1: return EVENT_THRESHOLDS[1]
+    return EVENT_THRESHOLDS[0]
+
+def parse_fixed_shifts(raw):
+    result = {}
+    raw = str(raw).strip()
+    if raw in ["", "nan", "None"]: return result
+
+    for item in raw.split(";"):
+        parts = item.split("|")
+        if len(parts) != 3: continue
+        day_name = parts[0].strip()
         try:
-            hol_df.columns = hol_df.columns.str.strip()
-            hol_df['Date'] = pd.to_datetime(hol_df['Date']).dt.date
-            if 'Status' in hol_df.columns:
-                approved = hol_df[hol_df['Status'].astype(str).str.lower() == 'approved']
-                for _, row in approved.iterrows():
-                    d = row['Date']
-                    name = str(row.get('Name', row.get('Employee ID', '')))
-                    holidays_by_date.setdefault(d, set()).add(name)
-        except:
-            pass
-    
-    # ── 3. LOAD EVENTS ────────────────────────────────────
-    events_df = load_events_for_week(ws, user)
-    
-    # ── 4. PER-DAY ANALYSIS ───────────────────────────────
-    # Base daily shifts from contracts:
-    # "If we must deliver total_min_hours across 7 days, how many shifts/day?"
-    contract_daily_base = total_min_hours / 7.0 / AVG_SHIFT_LENGTH
-    
-    day_suggestions = []
-    total_event_padding_hours = 0
-    
-    for i in range(7):
-        day_date = ws + timedelta(days=i)
-        day_name = day_date.strftime('%A')
-        dow = day_date.weekday()
-        
-        # ── Who is available this day? ──
-        available_names = []
-        fixed_working_count = 0   # people with fixed shifts on this day
-        
-        for _, emp in emp_df.iterrows():
-            emp_name = str(emp.get('Name', '')).strip()
-            emp_id = str(emp.get('ID', '')).strip()
-            
-            # Unavailable day?
-            unavail = str(emp.get('Unavailable Days', ''))
-            if unavail not in ['nan', '', 'None'] and day_name in unavail:
-                continue
-            
-            # Approved holiday?
-            if day_date in holidays_by_date:
-                if emp_name in holidays_by_date[day_date] or emp_id in holidays_by_date[day_date]:
-                    continue
-            
-            available_names.append(emp_name)
-            
-            # Count fixed-shift employees (guaranteed to work this day)
-            if str(emp.get('Fixed Shift Enabled', '')) == 'Yes':
-                fixed_raw = str(emp.get('Fixed Weekly Shift', ''))
-                if fixed_raw not in ['', 'nan', 'None'] and day_name in fixed_raw:
-                    fixed_working_count += 1
-        
-        avail_count = len(available_names)
-        
-        # ── Event data for this day ──
-        day_event_impact = 0
-        day_event_name = ''
-        day_event_is_evening = False
-        if not events_df.empty:
-            day_ev = events_df[events_df['Date'] == day_date]
-            if not day_ev.empty:
-                day_event_impact = int(day_ev['Impact Score'].max())
-                day_event_name = str(day_ev.iloc[0].get('Event Name', ''))
-                if 'Start Time' in day_ev.columns:
-                    late = day_ev[day_ev['Start Time'].astype(str) >= "17:00"]
-                    day_event_is_evening = not late.empty
-        
-        # ── Calculate suggested MINIMUM staff ──
-        # Start from contractual base, weighted by day-of-week
-        weighted_base = contract_daily_base * DOW_WEIGHTS[dow]
-        suggested_min = max(1, math.ceil(weighted_base))
-        
-        # Floor at fixed-shift employees (they're guaranteed in)
-        suggested_min = max(suggested_min, fixed_working_count)
-        
-        # Floor at 2 (can't practically run a shop alone all day)
-        if avail_count >= 2:
-            suggested_min = max(suggested_min, 2)
-        
-        # Event boost
-        event_bump = 0
-        if day_event_impact >= 8:
-            # High: ensure at least 60% of available staff
-            event_floor = math.ceil(avail_count * 0.60)
-            event_bump = max(0, event_floor - suggested_min)
-            suggested_min = max(suggested_min, event_floor)
-        elif day_event_impact >= 5:
-            # Medium: bump by 1-2
-            event_bump = max(1, math.ceil(avail_count * 0.15))
-            suggested_min = suggested_min + event_bump
-        elif day_event_impact >= 1:
-            # Low: bump by 1 if room
-            event_bump = 1
-            suggested_min = suggested_min + 1
-        
-        # Cap at available staff
-        suggested_min = min(suggested_min, avail_count)
-        
-        # ── Calculate suggested MAXIMUM staff ──
-        # Give the solver breathing room above minimum
-        if day_event_impact >= 8:
-            headroom = 3
-        elif day_event_impact >= 5:
-            headroom = 2
-        else:
-            headroom = 2
-        
-        suggested_max = min(avail_count, suggested_min + headroom)
-        suggested_max = max(suggested_max, suggested_min)  # sanity
-        
-        # ── Calculate suggested CLOSING staff ──
-        suggested_closing = 2
-        if day_event_is_evening and day_event_impact >= 8:
-            suggested_closing = 4
-        elif day_event_is_evening and day_event_impact >= 5:
-            suggested_closing = 3
-        elif dow in (4, 5):   # Fri/Sat evenings are busier
-            suggested_closing = min(2, suggested_min)
-        
-        suggested_closing = min(suggested_closing, suggested_min)
-        suggested_closing = max(suggested_closing, 1)
-        
-        # ── Track event padding for budget ──
-        event_padding_hours = event_bump * AVG_SHIFT_LENGTH
-        total_event_padding_hours += event_padding_hours
-        
-        # ── Reasoning text ──
-        reasons = []
-        reasons.append(f"Contract base: {weighted_base:.1f} shifts")
-        reasons.append(f"Available: {avail_count}/{total_staff} staff")
-        if fixed_working_count:
-            reasons.append(f"Fixed shifts: {fixed_working_count}")
-        if avail_count < total_staff:
-            absent = total_staff - avail_count
-            reasons.append(f"Absent: {absent} (holiday/unavailable)")
-        if day_event_impact:
-            reasons.append(f"Event: {day_event_name[:25]} (impact {day_event_impact}/10)")
-        
-        day_suggestions.append({
-            'date': day_date,
-            'day_name': day_name,
-            'dow': dow,
-            'available_count': avail_count,
-            'fixed_working': fixed_working_count,
-            'event_impact': day_event_impact,
-            'event_name': day_event_name,
-            'event_is_evening': day_event_is_evening,
-            'suggested_min': suggested_min,
-            'suggested_max': suggested_max,
-            'suggested_closing': suggested_closing,
-            'reasons': reasons,
-        })
-    
-    # ── 5. BUDGET CALCULATION ─────────────────────────────
-    # Floor: contractual minimums (you MUST pay this no matter what)
-    budget_floor = math.ceil(total_min_hours)
-    
-    # Suggested: enough for the solver to place shifts optimally
-    staffing_hours = sum(d['suggested_min'] * AVG_SHIFT_LENGTH for d in day_suggestions)
-    solver_buffer = math.ceil(staffing_hours * 0.12)   # 12% flexibility
-    event_pad = math.ceil(total_event_padding_hours)
-    budget_suggested = math.ceil(staffing_hours + solver_buffer + event_pad)
-    
-    # Ensure budget covers contractual floor
-    budget_suggested = max(budget_suggested, budget_floor + solver_buffer)
-    
-    # Ceiling: theoretical max if everyone worked max hours
-    budget_ceiling = math.ceil(total_max_hours)
-    
-    # ── 6. SHIFT BALANCE VALIDATION ───────────────────────
-    total_max_slots = sum(d['suggested_max'] for d in day_suggestions)
-    min_shifts_required = sum(math.ceil(h / MAX_SHIFT_LENGTH) for h in emp_df['_min_hrs'] if h > 0)
-    
-    return {
-        'days': day_suggestions,
-        'total_staff': total_staff,
-        'ft_count': ft_count,
-        'pt_count': pt_count,
-        'total_min_hours': total_min_hours,
-        'total_max_hours': total_max_hours,
-        'opener_count': opener_count,
-        'budget_floor': budget_floor,
-        'budget_suggested': budget_suggested,
-        'budget_ceiling': budget_ceiling,
-        'staffing_hours': staffing_hours,
-        'solver_buffer': solver_buffer,
-        'event_padding': event_pad,
-        'min_shifts_required': min_shifts_required,
-        'total_max_slots': total_max_slots,
-    }
+            start_h = int(parts[1].split(":")[0])
+            end_h = int(parts[2].split(":")[0])
+            if end_h == 0: end_h = 24
+            result[day_name] = (start_h, end_h)
+        except: pass
+    return result
 
-def save_all(df, user):
+def run_event_tracker():
     try:
-        df['Date'] = pd.to_datetime(df['Date'])
-        df = df.sort_values('Date').drop_duplicates(subset=['Date'], keep='last')
+        if os.path.exists(EVENT_SCRIPT):
+            subprocess.run([sys.executable, EVENT_SCRIPT], capture_output=True, text=True, cwd=BASE_DIR)
+    except: pass
 
-        df_upload = df.copy()
-        if 'Date' in df_upload.columns:
-            df_upload['Date'] = df_upload['Date'].apply(lambda x: x.strftime('%Y-%m-%d') if pd.notna(x) else '')
-        for col in ['Start', 'End']:
-            if col in df_upload.columns:
-                df_upload[col] = df_upload[col].apply(lambda x: x.strftime('%H:%M:%S') if pd.notna(x) else '')
+def load_events_for_dates(dates_list, df_ev): 
+    event_map = {}
+    try:
+        if df_ev.empty: return event_map
+
+        df_ev.columns = df_ev.columns.str.strip()
+        for _, row in df_ev.iterrows():
+            try:
+                d_str = pd.to_datetime(row['Date']).strftime('%Y-%m-%d')
+                if d_str not in dates_list: continue
                 
-        write_user_data(sheet_id, SHEET_TEMPLATE, user, df_upload)
-        st.cache_data.clear()
-    except Exception as e:
-        st.error(f"Error saving to Google Sheets: {e}")
+                start_time = str(row.get('Start Time', '12:00'))
+                try:
+                    start_hour = int(start_time.split(':')[0]) if ':' in start_time else 12 
+                except: start_hour = 12
+                
+                impact = int(row.get('Impact Score', 0))
+                if d_str not in event_map or impact > event_map[d_str]['impact']:
+                    event_map[d_str] = {
+                        'impact': impact,
+                        'start_hour': start_hour,
+                        'event_name': str(row.get('Event Name', 'Event')),
+                        'venue': str(row.get('Venue', ''))
+                    }
+            except: continue
+    except: pass
+    return event_map
 
-def nav_to(view, ws=None):
-    st.session_state.sched_view = view
-    if ws is not None:
-        st.session_state.sched_ws = ws
-    if view != "add":
-        st.session_state.week_events = None
-        st.session_state.events_scanned = False
-    st.rerun()
+def solve_rota_final_v14(sheet_id=None, target_weeks=None, username=None):
+    if not sheet_id:
+        raise ValueError("System Error: No Google Sheet ID was provided to the backend.")
+    if not username:
+        raise ValueError("System Error: No Username was provided to the backend. User data cannot be isolated.")
 
-def week_label(ws):
-    we = ws + timedelta(days=6)
-    wn = (ws + timedelta(days=3)).isocalendar()[1]
-    return f"Week {wn} · {ws.strftime('%d %b')} – {we.strftime('%d %b %Y')}"
+    run_event_tracker()
 
-def impact_color(score):
-    if score >= 8: return "#DC2626"
-    elif score >= 5: return "#D97706"
-    return "#16A34A"
+    # --- ISOLATED MULTI-TENANT DATA FETCH ---
+    df_emp = get_user_data(sheet_id, "Employees", username)
+    df_shifts = get_user_data(sheet_id, "Shift Template", username) 
+    df_hol = get_user_data(sheet_id, "Holiday", username) 
+    df_events = get_user_data(sheet_id, "Events", username)
+    
+    if df_emp.empty: raise ValueError("No data found in the 'Employees' tab. Please add employees first.")
+    if df_shifts.empty: raise ValueError("No data found in the 'Shift Template' tab. Please set up shift rules first.")
 
-def impact_label(score):
-    if score >= 8: return "HIGH"
-    elif score >= 5: return "MEDIUM"
-    return "LOW"
+    df_shifts.columns = df_shifts.columns.str.strip()
+    df_emp.columns = df_emp.columns.str.strip()
+    
+    df_shifts['Date'] = pd.to_datetime(df_shifts['Date'])
+    
+    df_shifts = df_shifts.sort_values("Date").drop_duplicates(subset=["Date"], keep="last")
 
-def display_compact_events(events_df):
-    """A clean, compact event display for the Edit/Add screens."""
-    if events_df is None or events_df.empty:
-        st.info("✅ No significant events found for this week.")
-        return
-        
-    st.markdown("##### 🎫 Weekly Events Context")
-    for _, ev in events_df.iterrows():
-        score = int(ev.get('Impact Score', 0))
-        color = impact_color(score)
-        label = impact_label(score)
-        ev_date = ev['Date']
-        ev_date_str = ev_date.strftime('%A') if isinstance(ev_date, date) else str(ev_date)[:10]
-        
-        st.markdown(f"""
-        <div style='border-left: 4px solid {color}; background: #F8FAFC; padding: 8px 12px; margin-bottom: 6px; border-radius: 4px; display: flex; justify-content: space-between; align-items: center;'>
-            <div>
-                <strong style='color: #1E293B;'>{ev.get('Event Name', 'Event')}</strong>
-                <span style='color: #64748B; font-size: 0.85em; margin-left: 8px;'>📅 {ev_date_str} @ {ev.get('Start Time', '')}</span>
-            </div>
-            <span style='background:{color}; color:white; padding:2px 8px; border-radius:12px; font-size:0.75em; font-weight:bold;'>{label} IMPACT ({score}/10)</span>
-        </div>
-        """, unsafe_allow_html=True)
+    if 'Total Sales' not in df_shifts.columns:
+        df_shifts['Total Sales'] = 0
 
-# ======================================================
-# SIDEBAR
-# ======================================================
-
-def get_sched_weeks(user):
-    df = load_all(user)
-    if df.empty: return set()
-    return {get_week_start(d) for d in df["Date"]}
-
-def render_sidebar():
-    sw = get_sched_weeks(username)
-    with st.sidebar:
-        st.markdown("### 📊 Scheduling")
-        st.metric("Weeks Configured", len(sw))
-
-render_sidebar()
-
-# ======================================================
-# CALENDAR VIEW
-# ======================================================
-
-def show_calendar():
-    sw = get_sched_weeks(username)
-    st.markdown("<div class='page-title'>📅 Scheduling</div>", unsafe_allow_html=True)
-    st.markdown("<div class='page-sub'>Manage weekly templates</div>", unsafe_allow_html=True)
-
-    yr = st.session_state.sched_yr
-    mo = st.session_state.sched_mo
-
-    c1, c2, c3 = st.columns([1, 6, 1])
-    with c1:
-        if st.button("◀", key="prev_cal"):
-            st.session_state.sched_mo = 12 if mo == 1 else mo - 1
-            if mo == 1: st.session_state.sched_yr = yr - 1
-            st.rerun()
-    with c2:
-        st.markdown(f"## {datetime(yr, mo, 1).strftime('%B %Y')}")
-    with c3:
-        if st.button("▶", key="next_cal"):
-            st.session_state.sched_mo = 1 if mo == 12 else mo + 1
-            if mo == 12: st.session_state.sched_yr = yr + 1
-            st.rerun()
-
-    st.write("")
-    headers = st.columns(7)
-    for i, d in enumerate(["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]):
-        headers[i].markdown(f"**{d}**")
-
-    for week in calendar.monthcalendar(yr, mo):
-        cols = st.columns(7)
-        for i, dn in enumerate(week):
-            with cols[i]:
-                if dn == 0:
-                    st.write("")
-                    continue
-
-                curr = date(yr, mo, dn)
-                ws = get_week_start(curr)
-                has_data = ws in sw
-
-                badge = "✓ Set" if has_data else "+ Add"
-                css = "cell-sched" if has_data else "cell-empty"
-
-                st.markdown(
-                    f"""
-                    <div class='cal-cell {css}'>
-                    <div class='day-num'>{dn}</div>
-                    <span class='day-badge {'badge-sched' if has_data else 'badge-empty'}'>
-                    {badge}
-                    </span>
-                    </div>
-                    """,
-                    unsafe_allow_html=True
-                )
-
-                if st.button("Edit" if has_data else "Add", key=f"day_{yr}_{mo}_{dn}"):
-                    nav_to("week" if has_data else "add", ws=ws)
-
-# ======================================================
-# EDIT WEEK 
-# ======================================================
-
-def show_week_view():
-    ws = st.session_state.sched_ws
-    if ws is None:
-        nav_to("calendar")
-        return
-
-    df_all = load_all(username)
-    if df_all.empty:
-        st.warning("No data found.")
-        return
-
-    ws_str = ws.strftime('%Y-%m-%d')
-    df_all["_ws_str"] = df_all["Date"].apply(
-        lambda x: (pd.to_datetime(x).date() - timedelta(days=pd.to_datetime(x).weekday())).strftime('%Y-%m-%d')
+    df_shifts['Week_Num'] = df_shifts['Date'].dt.isocalendar().week
+    
+    df_shifts['Week_Start_Str'] = df_shifts['Date'].apply(
+        lambda x: (x.date() - timedelta(days=x.weekday())).strftime('%Y-%m-%d')
     )
     
-    wd = df_all[df_all["_ws_str"] == ws_str].copy()
+    if target_weeks:
+        t_weeks_str = [x.strftime('%Y-%m-%d') if hasattr(x, 'strftime') else str(x) for x in target_weeks]
+        df_shifts = df_shifts[df_shifts['Week_Start_Str'].isin(t_weeks_str)].copy()
 
-    st.markdown(f"<div class='page-title'>✏️ {week_label(ws)}</div>", unsafe_allow_html=True)
+    if df_shifts.empty:
+        raise ValueError(f"No shift template data found for the selected week. Ensure the dates in the 'Shift Template' tab match the calendar.")
 
-    if wd.empty:
-        st.warning("No schedule found.")
-        return
+    approved_holidays = set() 
+    if not df_hol.empty:
+        try:
+            df_hol.columns = df_hol.columns.str.strip()
+            df_hol['Date'] = pd.to_datetime(df_hol['Date']).dt.normalize()
+            if 'Employee ID' in df_hol.columns:
+                df_hol['Employee ID'] = df_hol['Employee ID'].astype(str).str.strip()
+            elif 'Name' in df_hol.columns:
+                 df_hol['Employee ID'] = df_hol['Name'].astype(str).str.strip()
 
-    wd = wd.drop(columns=["_ws_str"])
-    budget = int(wd["Budget"].max()) if "Budget" in wd.columns else 300
+            if 'Status' in df_hol.columns:
+                approved_df = df_hol[df_hol['Status'].astype(str).str.lower() == 'approved']
+                for _, row in approved_df.iterrows():
+                    h_date = row['Date'].strftime('%Y-%m-%d')
+                    h_id = str(row.get('Employee ID', row.get('Name', '')))
+                    approved_holidays.add((h_id, h_date))
+        except: pass
+
+    df_emp['ID'] = df_emp['ID'].astype(str)
+    employees = df_emp.to_dict('index')
     
-    # Smart suggestion for budget comparison
-    suggestions = build_smart_suggestions(ws, username)
-    
-    # 1. Budget Input with smart hint
-    if suggestions:
-        rec = suggestions['budget_suggested']
-        if budget < suggestions['budget_floor']:
-            st.warning(f"⚠️ Current budget ({budget}h) is below the contractual floor ({suggestions['budget_floor']}h).")
+    unique_weeks = df_shifts['Week_Num'].unique()
+    weekly_dataframes = {}
+
+    for week in unique_weeks:
+        week_data = df_shifts[df_shifts['Week_Num'] == week].copy()
+        week_data = week_data.sort_values('Date')
+        dates_in_order = week_data['Date'].dt.strftime('%Y-%m-%d').unique()
         
-        new_budget = st.number_input(
-            "Weekly Budget (hours)",
-            value=budget,
-            min_value=0,
-            max_value=3000,
-            help=f"💡 Recommended: {rec}h (floor: {suggestions['budget_floor']}h, ceiling: {suggestions['budget_ceiling']}h)"
-        )
-    else:
-        new_budget = st.number_input("Weekly Budget (hours)", value=budget, min_value=0, max_value=3000)
-    
-    st.divider()
-
-    # 2. Contextual Events
-    events_df = load_events_for_week(ws, username)
-    display_compact_events(events_df)
-    st.write("")
-
-    # 3. Editable Table
-    st.markdown("##### 📋 Adjust Daily Requirements")
-    edited = st.data_editor(wd, use_container_width=True, hide_index=True)
-    st.divider()
-
-    # 4. Mathematical Validation
-    if suggestions:
-        required_shifts = suggestions['min_shifts_required']
-    else:
-        required_shifts = get_required_shifts(username)
-    
-    max_shifts_allowed = int(edited['Maximum Employees'].sum()) if 'Maximum Employees' in edited.columns else 0
-    
-    st.markdown("### ⚖️ Shift Balance Check")
-    sc1, sc2 = st.columns(2)
-    sc1.metric("Minimum Shifts Required", required_shifts, help="Based on employees' minimum contractual hours")
-    sc2.metric("Max Shifts Allowed", max_shifts_allowed, delta=max_shifts_allowed - required_shifts, help="Total of the 'Maximum Employees' column")
-    
-    can_save = True
-    if max_shifts_allowed < required_shifts:
-        st.error(f"⚠️ **Mathematical Impossibility:** You need at least {required_shifts} shifts to fulfill contracts, but your template only allows {max_shifts_allowed}. Please increase the 'Maximum Employees' limits in the table above.")
-        can_save = False
-    else:
-        st.success("✅ Shift balance looks good! The AI solver will be able to process this.")
-
-    # 5. Save/Back Controls
-    c1, c2 = st.columns(2)
-    with c1:
-        if st.button("💾 Save Changes", type="primary", use_container_width=True, disabled=not can_save):
-            edited["Budget"] = new_budget
-            others = df_all[df_all["_ws_str"] != ws_str].drop(columns=["_ws_str"])
-            final = pd.concat([others, edited], ignore_index=True)
-            save_all(final, username)
-            st.success("Saved.")
-            st.rerun()
-
-    with c2:
-        if st.button("◀ Back", use_container_width=True):
-            nav_to("calendar")
-
-# ======================================================
-# ADD WEEK 
-# ======================================================
-
-def show_add_view():
-    ws = st.session_state.sched_ws
-    if ws is None:
-        nav_to("calendar")
-        return
-
-    we = ws + timedelta(days=6)
-
-    st.markdown(f"<div class='page-title'>➕ {ws.strftime('%d %b')} – {we.strftime('%d %b')}</div>", unsafe_allow_html=True)
-
-    # ── 1. GENERATE SMART SUGGESTIONS ─────────────────────
-    suggestions = build_smart_suggestions(ws, username)
-    
-    if suggestions is None:
-        st.error("No employees found. Please add employees first.")
-        if st.button("◀ Back", use_container_width=True):
-            nav_to("calendar")
-        return
-    
-    # ── 2. WORKFORCE OVERVIEW PANEL ───────────────────────
-    st.markdown("##### 📊 Workforce Analysis")
-    
-    ov1, ov2, ov3, ov4 = st.columns(4)
-    ov1.metric("Total Staff", suggestions['total_staff'],
-               help=f"{suggestions['ft_count']} full-time, {suggestions['pt_count']} part-time")
-    ov2.metric("Contract Hours", f"{suggestions['total_min_hours']:.0f}h",
-               help="Sum of all employees' minimum contractual hours")
-    ov3.metric("Max Capacity", f"{suggestions['total_max_hours']:.0f}h",
-               help="Sum of all employees' maximum weekly hours")
-    ov4.metric("Openers Trained", suggestions['opener_count'])
-    
-    st.write("")
-    
-    # ── 3. EVENTS CONTEXT ─────────────────────────────────
-    events_df = load_events_for_week(ws, username)
-    display_compact_events(events_df)
-    st.write("")
-    
-    # ── 4. BUDGET SUGGESTION ──────────────────────────────
-    st.markdown("##### 💰 Suggested Weekly Budget")
-    
-    bc1, bc2, bc3 = st.columns(3)
-    bc1.metric("Floor", f"{suggestions['budget_floor']}h",
-               help="Contractual minimum — you must pay at least this")
-    bc2.metric("Recommended", f"{suggestions['budget_suggested']}h",
-               help="Gives the solver enough room to build an optimal rota")
-    bc3.metric("Ceiling", f"{suggestions['budget_ceiling']}h",
-               help="Theoretical max if every employee worked maximum hours")
-    
-    with st.expander("📐 Budget Breakdown"):
-        st.markdown(f"""
-        **How the recommended budget was calculated:**
+        event_data = load_events_for_dates(list(dates_in_order), df_events)
         
-        | Component | Hours |
-        |-----------|-------|
-        | Staffing base (min staff × {AVG_SHIFT_LENGTH}h avg shift) | {suggestions['staffing_hours']:.0f}h |
-        | Solver flexibility buffer (12%) | +{suggestions['solver_buffer']}h |
-        | Event staffing padding | +{suggestions['event_padding']}h |
-        | **Recommended total** | **{suggestions['budget_suggested']}h** |
+        weekly_budget_hours = 9999
+        if 'Budget' in week_data.columns:
+            val = week_data['Budget'].max()
+            if not pd.isna(val) and val > 0: weekly_budget_hours = int(val)
+
+        model = cp_model.CpModel()
         
-        *The floor of {suggestions['budget_floor']}h is the absolute contractual minimum. 
-        The recommended budget adds flexibility so the solver can optimize shift lengths 
-        and handle edge cases without hitting a hard wall.*
-        """)
-    
-    budget = st.number_input(
-        "Weekly Budget (hours)",
-        value=suggestions['budget_suggested'],
-        min_value=0,
-        max_value=3000,
-        help="Pre-filled with the recommended budget. Adjust if needed."
-    )
-    
-    if budget < suggestions['budget_floor']:
-        st.warning(f"⚠️ Budget ({budget}h) is below the contractual floor ({suggestions['budget_floor']}h). The solver may fail.")
-    
-    st.divider()
-    
-    # ── 5. PER-DAY SUGGESTIONS TABLE ──────────────────────
-    st.markdown("##### 📋 Daily Staffing Suggestions")
-    st.caption("Pre-filled using workforce analysis, contracts, availability, holidays and events. Adjust as needed.")
-    
-    rows = []
-    for day in suggestions['days']:
-        rows.append({
-            "Date": pd.Timestamp(day['date']),
-            "Start": time(7, 0),
-            "End": time(0, 0),
-            "Minimum Staff": day['suggested_min'],
-            "Maximum Employees": day['suggested_max'],
-            "Minimum closing staff": day['suggested_closing'],
-        })
-    
-    base = pd.DataFrame(rows)
-    edited = st.data_editor(base, use_container_width=True, hide_index=True)
-    
-    # ── 6. PER-DAY REASONING ──────────────────────────────
-    with st.expander("🧠 Why these numbers?"):
-        for day in suggestions['days']:
-            d = day['date']
-            impact = day['event_impact']
+        work, start, is_working_day, daily_start_hour, daily_end_hour = {}, {}, {}, {}, {}
+        emp_indices = df_emp.index.tolist()
+        all_worked_hours_vars = []
+        objective_terms = []
+
+        for idx in emp_indices:
+            for i, row in week_data.iterrows():
+                date_str = row['Date'].strftime('%Y-%m-%d')
+                start_h = pd.to_datetime(str(row['Start'])).hour
+                end_h = pd.to_datetime(str(row['End'])).hour
+                if end_h == 0: end_h = 24
+
+                is_working_day[(idx, date_str)] = model.NewBoolVar(f'day_{idx}_{date_str}')
+                daily_start_hour[(idx, date_str)] = model.NewIntVar(0, 24, f'start_h_{idx}_{date_str}')
+                daily_end_hour[(idx, date_str)] = model.NewIntVar(0, 24, f'end_h_{idx}_{date_str}')
+                
+                for h in range(start_h, end_h):
+                    work[(idx, date_str, h)] = model.NewBoolVar(f'w_{idx}_{date_str}_{h}')
+                    start[(idx, date_str, h)] = model.NewBoolVar(f's_{idx}_{date_str}_{h}')
+                    all_worked_hours_vars.append(work[(idx, date_str, h)])
+
+        model.Add(sum(all_worked_hours_vars) <= weekly_budget_hours)
+        total_hours_worked = sum(all_worked_hours_vars)
+        objective_terms.append(WEIGHT_UTILIZATION * total_hours_worked)
+
+        for idx in emp_indices:
+            emp = employees[idx]
+            emp_id = str(emp['ID']).strip()
+            enabled = str(emp.get('Fixed Shift Enabled', 'No')).strip()
+
+            if enabled == "Yes":
+                fixed_map = parse_fixed_shifts(emp.get('Fixed Weekly Shift', ''))
+                if fixed_map:
+                    for _, row in week_data.iterrows():
+                        date_obj = row['Date']
+                        date_str = date_obj.strftime('%Y-%m-%d')
+                        day_name = date_obj.day_name()
+
+                        if (emp_id, date_str) in approved_holidays: continue
+                        unavailable = str(emp.get('Unavailable Days', ''))
+                        if unavailable != 'nan' and day_name in unavailable: continue
+                        if day_name not in fixed_map: continue
+
+                        fixed_start, fixed_end = fixed_map[day_name]
+                        shop_start = pd.to_datetime(str(row['Start'])).hour
+                        shop_end = pd.to_datetime(str(row['End'])).hour
+                        if shop_end == 0: shop_end = 24
+
+                        fixed_start = max(fixed_start, shop_start)
+                        fixed_end = min(fixed_end, shop_end)
+
+                        if fixed_end > fixed_start:
+                            model.Add(is_working_day[(idx, date_str)] == 1)
+                            for h in range(shop_start, shop_end):
+                                if fixed_start <= h < fixed_end: model.Add(work[(idx, date_str, h)] == 1)
+                                else: model.Add(work[(idx, date_str, h)] == 0)
+
+
+        for idx in emp_indices:
+            emp = employees[idx]
+            fixed_role = str(emp.get('Fixed Role', '')).strip()
             
-            # Color-code by event impact
-            if impact >= 8:
-                border_color = "#DC2626"
-            elif impact >= 5:
-                border_color = "#D97706"
-            elif impact >= 1:
-                border_color = "#16A34A"
-            else:
-                border_color = "#E2E8F0"
+            if fixed_role in ['Opening', 'Closing']:
+                for i, row in week_data.iterrows():
+                    date_str = row['Date'].strftime('%Y-%m-%d')
+                    start_h = pd.to_datetime(str(row['Start'])).hour
+                    end_h = pd.to_datetime(str(row['End'])).hour
+                    if end_h == 0: end_h = 24
+                    
+                    if fixed_role == 'Opening':
+                        # If working, start time MUST equal the store's opening hour
+                        model.Add(daily_start_hour[(idx, date_str)] == start_h).OnlyEnforceIf(is_working_day[(idx, date_str)])
+                        
+                    elif fixed_role == 'Closing':
+                        # If working, end time MUST equal the store's closing hour
+                        model.Add(daily_end_hour[(idx, date_str)] == end_h).OnlyEnforceIf(is_working_day[(idx, date_str)])
+                        
+
+        for idx in emp_indices:
+            emp_id = employees[idx]['ID']
+            for i, row in week_data.iterrows():
+                date_str = row['Date'].strftime('%Y-%m-%d')
+                if (emp_id, date_str) in approved_holidays or (employees[idx]['Name'], date_str) in approved_holidays:
+                    model.Add(is_working_day[(idx, date_str)] == 0)
+                    start_h = pd.to_datetime(str(row['Start'])).hour
+                    end_h = pd.to_datetime(str(row['End'])).hour
+                    if end_h == 0: end_h = 24
+                    for h in range(start_h, end_h): model.Add(work[(idx, date_str, h)] == 0)
+
+        for idx in emp_indices:
+            emp = employees[idx]
+            emp_id = emp['ID']
+            emp_name = emp['Name']
             
-            reason_text = " · ".join(day['reasons'])
+            available_days_count = 0
+            for d in dates_in_order:
+                unavailable_str = str(emp.get('Unavailable Days', ''))
+                day_name = pd.to_datetime(d).day_name()
+                is_holiday = (emp_id, d) in approved_holidays or (emp_name, d) in approved_holidays
+                is_unavailable = (unavailable_str != 'nan' and day_name in unavailable_str)
+                if not is_holiday and not is_unavailable: available_days_count += 1
             
-            st.markdown(f"""
-            <div style='border-left: 4px solid {border_color}; padding: 6px 12px; margin-bottom: 4px;
-                         background: #F8FAFC; border-radius: 4px; font-size: 0.85em;'>
-                <strong>{day['day_name']} {d.strftime('%d %b')}</strong> — 
-                Min: {day['suggested_min']} · Max: {day['suggested_max']} · Close: {day['suggested_closing']}
-                <br><span style='color: #64748B;'>{reason_text}</span>
-            </div>
-            """, unsafe_allow_html=True)
-    
-    st.divider()
-    
-    # ── 7. SHIFT BALANCE CHECK ────────────────────────────
-    required_shifts = suggestions['min_shifts_required']
-    max_shifts_allowed = int(edited['Maximum Employees'].sum()) if 'Maximum Employees' in edited.columns else 0
-    
-    st.markdown("### ⚖️ Shift Balance Check")
-    sc1, sc2 = st.columns(2)
-    sc1.metric("Minimum Shifts Required", required_shifts, help="Based on employees' minimum contractual hours")
-    sc2.metric("Max Shifts Allowed", max_shifts_allowed, delta=max_shifts_allowed - required_shifts, help="Total of the 'Maximum Employees' column")
-    
-    can_save = True
-    if max_shifts_allowed < required_shifts:
-        st.error(f"⚠️ **Mathematical Impossibility:** You need at least {required_shifts} shifts to fulfill contracts, but your template only allows {max_shifts_allowed}. Please increase the 'Maximum Employees' limits in the table above.")
-        can_save = False
+            max_physical_capacity = available_days_count * MAX_SHIFT_LENGTH
+            
+            try:
+                if 'Minimum Contractual Hours' in emp: original_min = int(emp['Minimum Contractual Hours'])
+                elif 'Minimum Contractual Hours ' in emp: original_min = int(emp['Minimum Contractual Hours '])
+                else: original_min = 0 
+            except: original_min = 0
+
+            adjusted_min = min(original_min, max_physical_capacity)
+            original_max = int(emp.get('Max Weekly Hours', 40))
+
+            total_hours_vars = [
+                work[(idx, row['Date'].strftime('%Y-%m-%d'), h)] 
+                for _, row in week_data.iterrows() 
+                for h in range(pd.to_datetime(str(row['Start'])).hour, 24 if pd.to_datetime(str(row['End'])).hour == 0 else pd.to_datetime(str(row['End'])).hour)
+            ]
+            
+            # Create a variable representing the employee's total hours
+            emp_hours_var = model.NewIntVar(0, 100, f'emp_hrs_{idx}')
+            model.Add(emp_hours_var == sum(total_hours_vars))
+            model.Add(emp_hours_var >= adjusted_min)
+            model.Add(emp_hours_var <= original_max)
+            
+            # LOAD BALANCER: Square the hours variable to heavily penalize unfair concentrations
+            sq_hours = model.NewIntVar(0, 10000, f'sq_hrs_{idx}')
+            model.AddMultiplicationEquality(sq_hours, [emp_hours_var, emp_hours_var])
+            objective_terms.append(-WEIGHT_FAIRNESS * sq_hours) # Subtract from objective
+            
+            total_working_days = [is_working_day[(idx, d)] for d in dates_in_order]
+            model.Add(sum(total_working_days) <= MAX_CONSECUTIVE_DAYS) 
+
+        for i, row in week_data.iterrows():
+            date_str = row['Date'].strftime('%Y-%m-%d')
+            start_h = pd.to_datetime(str(row['Start'])).hour
+            end_h = pd.to_datetime(str(row['End'])).hour
+            if end_h == 0: end_h = 24
+            hours_range = list(range(start_h, end_h))
+
+            for idx in emp_indices:
+                model.Add(sum(work[(idx, date_str, h)] for h in hours_range) > 0).OnlyEnforceIf(is_working_day[(idx, date_str)])
+                model.Add(sum(work[(idx, date_str, h)] for h in hours_range) == 0).OnlyEnforceIf(is_working_day[(idx, date_str)].Not())
+                
+                for h in hours_range:
+                    if h == start_h: model.Add(start[(idx, date_str, h)] == work[(idx, date_str, h)])
+                    else:
+                        model.Add(work[(idx, date_str, h)] >= start[(idx, date_str, h)])
+                        model.Add(start[(idx, date_str, h)] >= work[(idx, date_str, h)] - work[(idx, date_str, h-1)])
+                
+                model.Add(sum(start[(idx, date_str, h)] for h in hours_range) <= 1)
+                model.Add(daily_start_hour[(idx, date_str)] == sum(h * start[(idx, date_str, h)] for h in hours_range))
+                
+                duration = sum(work[(idx, date_str, h)] for h in hours_range)
+                model.Add(daily_end_hour[(idx, date_str)] == daily_start_hour[(idx, date_str)] + duration)
+                model.Add(duration >= MIN_SHIFT_LENGTH).OnlyEnforceIf(is_working_day[(idx, date_str)])
+                model.Add(duration <= MAX_SHIFT_LENGTH).OnlyEnforceIf(is_working_day[(idx, date_str)])
+
+        for idx in emp_indices:
+            emp = employees[idx]
+            fixed_slot = str(emp.get('Fixed Slot', ''))
+            if fixed_slot not in ['nan', 'None', 'Any', '']:
+                for i, row in week_data.iterrows():
+                    date_str = row['Date'].strftime('%Y-%m-%d')
+                    start_h = pd.to_datetime(str(row['Start'])).hour
+                    end_h = pd.to_datetime(str(row['End'])).hour
+                    if end_h == 0: end_h = 24
+                    
+                    if 'Morning' in fixed_slot and 'Evening' not in fixed_slot:
+                        for h in range(start_h, end_h):
+                            if h >= EVENING_START_HOUR: model.Add(work[(idx, date_str, h)] == 0)
+                    if 'Evening' in fixed_slot and 'Morning' not in fixed_slot:
+                        for h in range(start_h, end_h):
+                            if h < MORNING_END_HOUR: model.Add(work[(idx, date_str, h)] == 0)
+                    if fixed_slot == 'Afternoon':
+                        for h in range(start_h, end_h):
+                            if h < 10 or h >= 20: model.Add(work[(idx, date_str, h)] == 0)
+
+        # --- DAILY AVAILABILITY WINDOWS ---
+        # Restricts employees to only work within their available hours on specific days.
+        # Uses the same format as Fixed Weekly Shift: DayName|HH:MM|HH:MM;...
+        for idx in emp_indices:
+            emp = employees[idx]
+            daily_avail_raw = str(emp.get('Daily Available Hours', ''))
+            if daily_avail_raw not in ['', 'nan', 'None']:
+                avail_map = parse_fixed_shifts(daily_avail_raw)  # Same format, reuse parser
+                if avail_map:
+                    for _, row in week_data.iterrows():
+                        date_str = row['Date'].strftime('%Y-%m-%d')
+                        day_name = row['Date'].day_name()
+                        
+                        if day_name not in avail_map:
+                            continue  # No restriction on this day
+                        
+                        avail_start, avail_end = avail_map[day_name]
+                        shop_start = pd.to_datetime(str(row['Start'])).hour
+                        shop_end = pd.to_datetime(str(row['End'])).hour
+                        if shop_end == 0: shop_end = 24
+                        
+                        # Block all hours outside the availability window
+                        for h in range(shop_start, shop_end):
+                            if h < avail_start or h >= avail_end:
+                                model.Add(work[(idx, date_str, h)] == 0)
+
+        for idx in emp_indices:
+            for i in range(len(dates_in_order) - 1):
+                today = dates_in_order[i]
+                tomorrow = dates_in_order[i+1]
+                model.Add(
+                    (daily_start_hour[(idx, tomorrow)] + 24) - daily_end_hour[(idx, today)] >= MIN_REST_HOURS
+                ).OnlyEnforceIf([is_working_day[(idx, today)], is_working_day[(idx, tomorrow)]])
+
+        for i, row in week_data.iterrows():
+            date_str = row['Date'].strftime('%Y-%m-%d')
+            day_name = row['Date'].day_name()
+            manual_min = int(row['Minimum Staff'])
+            
+            day_event = event_data.get(date_str, None)
+            event_impact = day_event['impact'] if day_event else 0
+            event_start_hour = day_event['start_hour'] if day_event else None
+            
+            second_start_earliest, second_start_latest, min_rush_staff = get_event_params(event_impact)
+            
+            sales_min = 0
+            if ENABLE_HYBRID_MODE:
+                sales_val = row['Total Sales']
+                if pd.isna(sales_val): sales_val = 0
+                sales_min = math.ceil(sales_val / REVENUE_PER_STAFF)
+            
+            final_min_headcount = max(manual_min, sales_min)
+            min_closing = int(row['Minimum closing staff'])
+            min_headcount = max(final_min_headcount, min_closing)
+            
+            manual_max = int(row['Maximum Employees'])
+            if min_headcount > manual_max: min_headcount = manual_max
+            max_headcount = manual_max  
+
+            model.Add(sum(is_working_day[(idx, date_str)] for idx in emp_indices) >= min_headcount)
+            model.Add(sum(is_working_day[(idx, date_str)] for idx in emp_indices) <= max_headcount)
+            
+            start_h = pd.to_datetime(str(row['Start'])).hour
+            end_h = pd.to_datetime(str(row['End'])).hour
+            if end_h == 0: end_h = 24
+            
+            for h in range(start_h, end_h): model.Add(sum(work[(idx, date_str, h)] for idx in emp_indices) >= 1)
+            last_hour = end_h - 1
+            model.Add(sum(work[(idx, date_str, last_hour)] for idx in emp_indices) >= min_closing)
+
+            if ENABLE_STRICT_SECOND_START:
+                if day_name == 'Sunday' and start_h == 6 and max_headcount >= 2:
+                    model.Add(sum(work[(idx, date_str, 6)] for idx in emp_indices) == 1)
+                    model.Add(sum(work[(idx, date_str, 7)] for idx in emp_indices) >= 2)
+                    
+                # FIX: Changed < to <= so it triggers correctly on High Impact days
+                elif start_h <= second_start_earliest and end_h >= second_start_latest and max_headcount >= 2:
+                    for h in range(start_h, second_start_earliest): 
+                        model.Add(sum(work[(idx, date_str, h)] for idx in emp_indices) == 1)
+                    
+                    # Force the second person to arrive by the 'latest' threshold
+                    model.Add(sum(work[(idx, date_str, second_start_latest)] for idx in emp_indices) >= 2)
+
+            if day_event and event_start_hour:
+                prep_hour = max(start_h, event_start_hour - EVENT_PREP_HOURS)
+                for h in range(prep_hour, min(event_start_hour + 2, end_h)): 
+                    model.Add(sum(work[(idx, date_str, h)] for idx in emp_indices) >= min_rush_staff)
+            
+            if ENABLE_RUSH_LOCK:
+                operating_hours = list(range(start_h, end_h))
+                for k in range(1, len(operating_hours) - 1):
+                    current_h = operating_hours[k]
+                    prev_h = operating_hours[k-1]
+                    current_staff = sum(work[(idx, date_str, current_h)] for idx in emp_indices)
+                    prev_staff = sum(work[(idx, date_str, prev_h)] for idx in emp_indices)
+                    rush_active = model.NewBoolVar(f'rush_active_{date_str}_{prev_h}')
+                    model.Add(prev_staff >= DEFAULT_RUSH_TRIGGER).OnlyEnforceIf(rush_active)
+                    model.Add(prev_staff < DEFAULT_RUSH_TRIGGER).OnlyEnforceIf(rush_active.Not())
+                    model.Add(current_staff >= min_rush_staff).OnlyEnforceIf(rush_active)
+
+        for i, row in week_data.iterrows():
+            date_str = row['Date'].strftime('%Y-%m-%d')
+            start_h = pd.to_datetime(str(row['Start'])).hour
+            trained = [idx for idx in emp_indices if employees[idx].get('Opening Trained', 'No') == 'Yes']
+            model.Add(sum(work[(idx, date_str, start_h)] for idx in trained) >= 1)
+            
+        for idx in emp_indices:
+            emp = employees[idx]
+            unavailable_str = str(emp.get('Unavailable Days', ''))
+            for i, row in week_data.iterrows():
+                date_str = row['Date'].strftime('%Y-%m-%d')
+                if unavailable_str != 'nan' and row['Date'].day_name() in unavailable_str: model.Add(is_working_day[(idx, date_str)] == 0)
+
+        for idx in emp_indices:
+            emp = employees[idx]
+            pref_day = str(emp.get('Preferred Day', ''))
+            for i, row in week_data.iterrows():
+                date_str = row['Date'].strftime('%Y-%m-%d')
+                if pref_day != 'nan' and row['Date'].day_name() in pref_day: objective_terms.append(WEIGHT_PREFERRED_DAY * is_working_day[(idx, date_str)])
+            
+            pref_slot = str(emp.get('Preferred slot', ''))
+            if pref_slot not in ['nan', 'None', 'Any', '']:
+                for i, row in week_data.iterrows():
+                    date_str = row['Date'].strftime('%Y-%m-%d')
+                    start_h = pd.to_datetime(str(row['Start'])).hour
+                    end_h = pd.to_datetime(str(row['End'])).hour
+                    if end_h == 0: end_h = 24
+                    
+                    if 'Morning' in pref_slot:
+                        morning_hours = [work[(idx, date_str, h)] for h in range(start_h, min(MORNING_END_HOUR, end_h))]
+                        if morning_hours:
+                            for mh in morning_hours: objective_terms.append(WEIGHT_PREFERRED_SLOT * mh)
+                    if 'Afternoon' in pref_slot:
+                        afternoon_hours = [work[(idx, date_str, h)] for h in range(max(12, start_h), min(17, end_h))]
+                        if afternoon_hours:
+                            for ah in afternoon_hours: objective_terms.append(WEIGHT_PREFERRED_SLOT * ah)
+                    if 'Evening' in pref_slot:
+                        evening_hours = [work[(idx, date_str, h)] for h in range(max(EVENING_START_HOUR, start_h), end_h)]
+                        if evening_hours:
+                            for eh in evening_hours: objective_terms.append(WEIGHT_PREFERRED_SLOT * eh)
+
+        model.Maximize(sum(objective_terms))
+
+        solver = cp_model.CpSolver()
+        solver.parameters.max_time_in_seconds = 60.0 
+        status = solver.Solve(model)
+        
+        if status == cp_model.OPTIMAL or status == cp_model.FEASIBLE:
+            current_week_results = []
+            for idx in emp_indices:
+                row_data = {
+                    'Employee ID': employees[idx]['ID'],
+                    'Name': employees[idx]['Name'],
+                }
+                weekly_h = 0
+                for i, row in week_data.iterrows():
+                    date_str = row['Date'].strftime('%Y-%m-%d')
+                    start_h = pd.to_datetime(str(row['Start'])).hour
+                    end_h = pd.to_datetime(str(row['End'])).hour
+                    if end_h == 0: end_h = 24
+                    
+                    shift_start, shift_end = None, None
+                    for h in range(start_h, end_h):
+                        if solver.Value(work[(idx, date_str, h)]):
+                            if shift_start is None: shift_start = h
+                            shift_end = h + 1
+                            weekly_h += 1
+                    
+                    col_key = f"{date_str} ({row['Date'].day_name()[:3]})"
+                    if shift_start is not None: row_data[col_key] = f"{shift_start:02d}:00 - {shift_end:02d}:00"
+                    else:
+                        emp_id = str(employees[idx]['ID']).strip()
+                        emp_name = str(employees[idx]['Name']).strip()
+                        if (emp_id, date_str) in approved_holidays or (emp_name, date_str) in approved_holidays: row_data[col_key] = "Holiday"
+                        else: row_data[col_key] = "OFF"
+                
+                row_data['Total Weekly Hours'] = weekly_h
+                current_week_results.append(row_data)
+            
+            df_week = pd.DataFrame(current_week_results)
+            cols = ['Name', 'Total Weekly Hours'] + [c for c in df_week.columns if c not in ['Name', 'Employee ID', 'Total Weekly Hours']]
+            df_week = df_week[cols]
+            weekly_dataframes[week] = df_week
+            
+        else:
+            raise ValueError(f"The AI could not find a mathematically possible schedule for Week {week}. Check your constraints (is the budget too low? Are there too many overlapping unavailable days?)")
+
+    if weekly_dataframes:
+        for week_num, df_week in weekly_dataframes.items():
+            sheet_name = f"Rota_{week_num}"
+            write_user_data(sheet_id, sheet_name, username, df_week)
     else:
-        st.success("✅ Shift balance looks good! The AI solver will be able to process this.")
-
-    # ── 8. SAVE / BACK ────────────────────────────────────
-    col1, col2 = st.columns(2)
-    with col1:
-        if st.button("💾 Save New Week", type="primary", use_container_width=True, disabled=not can_save):
-            edited["Budget"] = budget
-            df_all = load_all(username)
-
-            if df_all.empty:
-                final = edited
-            else:
-                final = pd.concat([df_all, edited], ignore_index=True)
-
-            save_all(final, username)
-            st.success("Week saved!")
-            nav_to("calendar")
-    
-    with col2:
-        if st.button("◀ Back", use_container_width=True):
-            nav_to("calendar")
-
-# ======================================================
-# ROUTER
-# ======================================================
-view = st.session_state.sched_view
-if view == "calendar": show_calendar()
-elif view == "week": show_week_view()
-elif view == "add": show_add_view()
+        raise ValueError("Unknown Error: The solver finished but no Rota was generated.")
