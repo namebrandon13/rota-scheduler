@@ -181,6 +181,257 @@ def get_required_shifts(user):
     except:
         return 0
 
+# ==============================================================
+#              SMART SUGGESTION ENGINE
+# ==============================================================
+
+# Day-of-week retail traffic weights (normalized so sum ≈ 7.0)
+# Derived from typical UK high-street footfall patterns
+_RAW_DOW = {
+    0: 0.80,   # Monday     — quiet recovery day
+    1: 0.80,   # Tuesday    — still slow
+    2: 0.85,   # Wednesday  — midweek uptick
+    3: 0.90,   # Thursday   — late-night shopping in some areas
+    4: 1.10,   # Friday     — pre-weekend rush
+    5: 1.30,   # Saturday   — peak retail day
+    6: 1.00,   # Sunday     — moderate (shorter hours too)
+}
+_DOW_SUM = sum(_RAW_DOW.values())
+DOW_WEIGHTS = {k: v * 7.0 / _DOW_SUM for k, v in _RAW_DOW.items()}
+
+AVG_SHIFT_LENGTH = 7.5   # midpoint of 6-9 hour shifts
+MIN_SHIFT_LENGTH = 6
+MAX_SHIFT_LENGTH = 9
+
+def build_smart_suggestions(ws, user):
+    """
+    Analyses the full workforce picture and returns intelligent per-day
+    staffing suggestions plus a recommended weekly budget.
+    
+    Uses: employee roster, contracts, availability, holidays, events,
+    fixed shifts, daily availability windows, and day-of-week patterns.
+    """
+
+    # ── 1. LOAD ALL DATA ──────────────────────────────────
+    emp_df = get_user_data(sheet_id, SHEET_EMPLOYEES, user)
+    if emp_df.empty:
+        return None
+    emp_df.columns = emp_df.columns.str.strip()
+    
+    total_staff = len(emp_df)
+    
+    # Contractual totals
+    emp_df['_min_hrs'] = pd.to_numeric(emp_df.get('Minimum Contractual Hours', 0), errors='coerce').fillna(0)
+    emp_df['_max_hrs'] = pd.to_numeric(emp_df.get('Max Weekly Hours', 40), errors='coerce').fillna(40)
+    total_min_hours = float(emp_df['_min_hrs'].sum())
+    total_max_hours = float(emp_df['_max_hrs'].sum())
+    
+    # Full-time vs part-time split (heuristic: ≥ 30h = full-time)
+    ft_count = int((emp_df['_min_hrs'] >= 30).sum())
+    pt_count = total_staff - ft_count
+    
+    # Openers
+    opener_count = 0
+    if 'Opening Trained' in emp_df.columns:
+        opener_count = int(emp_df['Opening Trained'].eq('Yes').sum())
+    
+    # ── 2. LOAD HOLIDAYS FOR THIS WEEK ────────────────────
+    hol_df = get_user_data(sheet_id, "Holiday", user)
+    holidays_by_date = {}   # date -> set of names/IDs on holiday
+    if not hol_df.empty:
+        try:
+            hol_df.columns = hol_df.columns.str.strip()
+            hol_df['Date'] = pd.to_datetime(hol_df['Date']).dt.date
+            if 'Status' in hol_df.columns:
+                approved = hol_df[hol_df['Status'].astype(str).str.lower() == 'approved']
+                for _, row in approved.iterrows():
+                    d = row['Date']
+                    name = str(row.get('Name', row.get('Employee ID', '')))
+                    holidays_by_date.setdefault(d, set()).add(name)
+        except:
+            pass
+    
+    # ── 3. LOAD EVENTS ────────────────────────────────────
+    events_df = load_events_for_week(ws, user)
+    
+    # ── 4. PER-DAY ANALYSIS ───────────────────────────────
+    # Base daily shifts from contracts:
+    # "If we must deliver total_min_hours across 7 days, how many shifts/day?"
+    contract_daily_base = total_min_hours / 7.0 / AVG_SHIFT_LENGTH
+    
+    day_suggestions = []
+    total_event_padding_hours = 0
+    
+    for i in range(7):
+        day_date = ws + timedelta(days=i)
+        day_name = day_date.strftime('%A')
+        dow = day_date.weekday()
+        
+        # ── Who is available this day? ──
+        available_names = []
+        fixed_working_count = 0   # people with fixed shifts on this day
+        
+        for _, emp in emp_df.iterrows():
+            emp_name = str(emp.get('Name', '')).strip()
+            emp_id = str(emp.get('ID', '')).strip()
+            
+            # Unavailable day?
+            unavail = str(emp.get('Unavailable Days', ''))
+            if unavail not in ['nan', '', 'None'] and day_name in unavail:
+                continue
+            
+            # Approved holiday?
+            if day_date in holidays_by_date:
+                if emp_name in holidays_by_date[day_date] or emp_id in holidays_by_date[day_date]:
+                    continue
+            
+            available_names.append(emp_name)
+            
+            # Count fixed-shift employees (guaranteed to work this day)
+            if str(emp.get('Fixed Shift Enabled', '')) == 'Yes':
+                fixed_raw = str(emp.get('Fixed Weekly Shift', ''))
+                if fixed_raw not in ['', 'nan', 'None'] and day_name in fixed_raw:
+                    fixed_working_count += 1
+        
+        avail_count = len(available_names)
+        
+        # ── Event data for this day ──
+        day_event_impact = 0
+        day_event_name = ''
+        day_event_is_evening = False
+        if not events_df.empty:
+            day_ev = events_df[events_df['Date'] == day_date]
+            if not day_ev.empty:
+                day_event_impact = int(day_ev['Impact Score'].max())
+                day_event_name = str(day_ev.iloc[0].get('Event Name', ''))
+                if 'Start Time' in day_ev.columns:
+                    late = day_ev[day_ev['Start Time'].astype(str) >= "17:00"]
+                    day_event_is_evening = not late.empty
+        
+        # ── Calculate suggested MINIMUM staff ──
+        # Start from contractual base, weighted by day-of-week
+        weighted_base = contract_daily_base * DOW_WEIGHTS[dow]
+        suggested_min = max(1, math.ceil(weighted_base))
+        
+        # Floor at fixed-shift employees (they're guaranteed in)
+        suggested_min = max(suggested_min, fixed_working_count)
+        
+        # Floor at 2 (can't practically run a shop alone all day)
+        if avail_count >= 2:
+            suggested_min = max(suggested_min, 2)
+        
+        # Event boost
+        event_bump = 0
+        if day_event_impact >= 8:
+            # High: ensure at least 60% of available staff
+            event_floor = math.ceil(avail_count * 0.60)
+            event_bump = max(0, event_floor - suggested_min)
+            suggested_min = max(suggested_min, event_floor)
+        elif day_event_impact >= 5:
+            # Medium: bump by 1-2
+            event_bump = max(1, math.ceil(avail_count * 0.15))
+            suggested_min = suggested_min + event_bump
+        elif day_event_impact >= 1:
+            # Low: bump by 1 if room
+            event_bump = 1
+            suggested_min = suggested_min + 1
+        
+        # Cap at available staff
+        suggested_min = min(suggested_min, avail_count)
+        
+        # ── Calculate suggested MAXIMUM staff ──
+        # Give the solver breathing room above minimum
+        if day_event_impact >= 8:
+            headroom = 3
+        elif day_event_impact >= 5:
+            headroom = 2
+        else:
+            headroom = 2
+        
+        suggested_max = min(avail_count, suggested_min + headroom)
+        suggested_max = max(suggested_max, suggested_min)  # sanity
+        
+        # ── Calculate suggested CLOSING staff ──
+        suggested_closing = 2
+        if day_event_is_evening and day_event_impact >= 8:
+            suggested_closing = 4
+        elif day_event_is_evening and day_event_impact >= 5:
+            suggested_closing = 3
+        elif dow in (4, 5):   # Fri/Sat evenings are busier
+            suggested_closing = min(2, suggested_min)
+        
+        suggested_closing = min(suggested_closing, suggested_min)
+        suggested_closing = max(suggested_closing, 1)
+        
+        # ── Track event padding for budget ──
+        event_padding_hours = event_bump * AVG_SHIFT_LENGTH
+        total_event_padding_hours += event_padding_hours
+        
+        # ── Reasoning text ──
+        reasons = []
+        reasons.append(f"Contract base: {weighted_base:.1f} shifts")
+        reasons.append(f"Available: {avail_count}/{total_staff} staff")
+        if fixed_working_count:
+            reasons.append(f"Fixed shifts: {fixed_working_count}")
+        if avail_count < total_staff:
+            absent = total_staff - avail_count
+            reasons.append(f"Absent: {absent} (holiday/unavailable)")
+        if day_event_impact:
+            reasons.append(f"Event: {day_event_name[:25]} (impact {day_event_impact}/10)")
+        
+        day_suggestions.append({
+            'date': day_date,
+            'day_name': day_name,
+            'dow': dow,
+            'available_count': avail_count,
+            'fixed_working': fixed_working_count,
+            'event_impact': day_event_impact,
+            'event_name': day_event_name,
+            'event_is_evening': day_event_is_evening,
+            'suggested_min': suggested_min,
+            'suggested_max': suggested_max,
+            'suggested_closing': suggested_closing,
+            'reasons': reasons,
+        })
+    
+    # ── 5. BUDGET CALCULATION ─────────────────────────────
+    # Floor: contractual minimums (you MUST pay this no matter what)
+    budget_floor = math.ceil(total_min_hours)
+    
+    # Suggested: enough for the solver to place shifts optimally
+    staffing_hours = sum(d['suggested_min'] * AVG_SHIFT_LENGTH for d in day_suggestions)
+    solver_buffer = math.ceil(staffing_hours * 0.12)   # 12% flexibility
+    event_pad = math.ceil(total_event_padding_hours)
+    budget_suggested = math.ceil(staffing_hours + solver_buffer + event_pad)
+    
+    # Ensure budget covers contractual floor
+    budget_suggested = max(budget_suggested, budget_floor + solver_buffer)
+    
+    # Ceiling: theoretical max if everyone worked max hours
+    budget_ceiling = math.ceil(total_max_hours)
+    
+    # ── 6. SHIFT BALANCE VALIDATION ───────────────────────
+    total_max_slots = sum(d['suggested_max'] for d in day_suggestions)
+    min_shifts_required = sum(math.ceil(h / MAX_SHIFT_LENGTH) for h in emp_df['_min_hrs'] if h > 0)
+    
+    return {
+        'days': day_suggestions,
+        'total_staff': total_staff,
+        'ft_count': ft_count,
+        'pt_count': pt_count,
+        'total_min_hours': total_min_hours,
+        'total_max_hours': total_max_hours,
+        'opener_count': opener_count,
+        'budget_floor': budget_floor,
+        'budget_suggested': budget_suggested,
+        'budget_ceiling': budget_ceiling,
+        'staffing_hours': staffing_hours,
+        'solver_buffer': solver_buffer,
+        'event_padding': event_pad,
+        'min_shifts_required': min_shifts_required,
+        'total_max_slots': total_max_slots,
+    }
+
 def save_all(df, user):
     try:
         df['Date'] = pd.to_datetime(df['Date'])
@@ -355,8 +606,25 @@ def show_week_view():
     wd = wd.drop(columns=["_ws_str"])
     budget = int(wd["Budget"].max()) if "Budget" in wd.columns else 300
     
-    # 1. Budget Input
-    new_budget = st.number_input("Weekly Budget (hours)", value=budget, min_value=0, max_value=3000)
+    # Smart suggestion for budget comparison
+    suggestions = build_smart_suggestions(ws, username)
+    
+    # 1. Budget Input with smart hint
+    if suggestions:
+        rec = suggestions['budget_suggested']
+        if budget < suggestions['budget_floor']:
+            st.warning(f"⚠️ Current budget ({budget}h) is below the contractual floor ({suggestions['budget_floor']}h).")
+        
+        new_budget = st.number_input(
+            "Weekly Budget (hours)",
+            value=budget,
+            min_value=0,
+            max_value=3000,
+            help=f"💡 Recommended: {rec}h (floor: {suggestions['budget_floor']}h, ceiling: {suggestions['budget_ceiling']}h)"
+        )
+    else:
+        new_budget = st.number_input("Weekly Budget (hours)", value=budget, min_value=0, max_value=3000)
+    
     st.divider()
 
     # 2. Contextual Events
@@ -370,7 +638,11 @@ def show_week_view():
     st.divider()
 
     # 4. Mathematical Validation
-    required_shifts = get_required_shifts(username)
+    if suggestions:
+        required_shifts = suggestions['min_shifts_required']
+    else:
+        required_shifts = get_required_shifts(username)
+    
     max_shifts_allowed = int(edited['Maximum Employees'].sum()) if 'Maximum Employees' in edited.columns else 0
     
     st.markdown("### ⚖️ Shift Balance Check")
@@ -411,75 +683,126 @@ def show_add_view():
         return
 
     we = ws + timedelta(days=6)
-    today = date.today()
 
     st.markdown(f"<div class='page-title'>➕ {ws.strftime('%d %b')} – {we.strftime('%d %b')}</div>", unsafe_allow_html=True)
 
-    # 1. Budget
-    budget = st.number_input("Weekly Budget (hours)", value=300, min_value=0, max_value=3000)
-    st.divider()
-
-    # 2. Event Display (Pulled directly from your cloud database)
-    events_df = load_events_for_week(ws, username)
+    # ── 1. GENERATE SMART SUGGESTIONS ─────────────────────
+    suggestions = build_smart_suggestions(ws, username)
     
-    if events_df.empty:
-        st.info("✅ No significant events found for this week in the database. (Go to the Events page to run a Live Scan if you need to fetch new ones).")
-    else:
-        display_compact_events(events_df)
-        
+    if suggestions is None:
+        st.error("No employees found. Please add employees first.")
+        if st.button("◀ Back", use_container_width=True):
+            nav_to("calendar")
+        return
+    
+    # ── 2. WORKFORCE OVERVIEW PANEL ───────────────────────
+    st.markdown("##### 📊 Workforce Analysis")
+    
+    ov1, ov2, ov3, ov4 = st.columns(4)
+    ov1.metric("Total Staff", suggestions['total_staff'],
+               help=f"{suggestions['ft_count']} full-time, {suggestions['pt_count']} part-time")
+    ov2.metric("Contract Hours", f"{suggestions['total_min_hours']:.0f}h",
+               help="Sum of all employees' minimum contractual hours")
+    ov3.metric("Max Capacity", f"{suggestions['total_max_hours']:.0f}h",
+               help="Sum of all employees' maximum weekly hours")
+    ov4.metric("Openers Trained", suggestions['opener_count'])
+    
     st.write("")
-
-    # 3. Editable Table (With Rule-Based AI)
-    st.markdown("##### 📋 Setup Daily Requirements")
     
-    # --- Simple AI Logic for Pre-filling ---
-    def apply_ai_rules(day_d, ev_df):
-        min_s = 4; max_s = 6; min_c = 2
-        if ev_df.empty: return min_s, max_s, min_c
-        
-        # Match events to this specific day
-        day_ev = ev_df[ev_df['Date'] == day_d]
-        if not day_ev.empty:
-            top_impact = int(day_ev['Impact Score'].max())
-            
-            if 5 <= top_impact < 8: max_s = 8
-            if top_impact >= 8: min_s = 6; max_s = 10
-            
-            # Closing rush logic
-            late = day_ev[day_ev['Start Time'].astype(str) >= "18:00"]
-            if not late.empty and top_impact >= 5:
-                min_c = 3
-                if top_impact >= 8: min_c = 4
-                
-        return min_s, max_s, min_c
-
-    # --- Build the Rows ---
-    rows = []
-    for i in range(7):
-        day_date = ws + timedelta(days=i)
-        
-        # Ask AI for the numbers based on events
-        ai_min, ai_max, ai_close = apply_ai_rules(day_date, events_df)
-        
-        rows.append({
-            "Date": pd.Timestamp(day_date),
-            "Start": time(7, 0),
-            "End": time(00, 0),
-            "Minimum Staff": ai_min,
-            "Maximum Employees": ai_max,
-            "Minimum closing staff": ai_close
-        })
-
-    base = pd.DataFrame(rows)
+    # ── 3. EVENTS CONTEXT ─────────────────────────────────
+    events_df = load_events_for_week(ws, username)
+    display_compact_events(events_df)
+    st.write("")
     
-    if not events_df.empty:
-        st.info("💡 AI has pre-filled the table below based on the Event Impact Scores.")
+    # ── 4. BUDGET SUGGESTION ──────────────────────────────
+    st.markdown("##### 💰 Suggested Weekly Budget")
+    
+    bc1, bc2, bc3 = st.columns(3)
+    bc1.metric("Floor", f"{suggestions['budget_floor']}h",
+               help="Contractual minimum — you must pay at least this")
+    bc2.metric("Recommended", f"{suggestions['budget_suggested']}h",
+               help="Gives the solver enough room to build an optimal rota")
+    bc3.metric("Ceiling", f"{suggestions['budget_ceiling']}h",
+               help="Theoretical max if every employee worked maximum hours")
+    
+    with st.expander("📐 Budget Breakdown"):
+        st.markdown(f"""
+        **How the recommended budget was calculated:**
         
-    edited = st.data_editor(base, use_container_width=True, hide_index=True)
+        | Component | Hours |
+        |-----------|-------|
+        | Staffing base (min staff × {AVG_SHIFT_LENGTH}h avg shift) | {suggestions['staffing_hours']:.0f}h |
+        | Solver flexibility buffer (12%) | +{suggestions['solver_buffer']}h |
+        | Event staffing padding | +{suggestions['event_padding']}h |
+        | **Recommended total** | **{suggestions['budget_suggested']}h** |
+        
+        *The floor of {suggestions['budget_floor']}h is the absolute contractual minimum. 
+        The recommended budget adds flexibility so the solver can optimize shift lengths 
+        and handle edge cases without hitting a hard wall.*
+        """)
+    
+    budget = st.number_input(
+        "Weekly Budget (hours)",
+        value=suggestions['budget_suggested'],
+        min_value=0,
+        max_value=3000,
+        help="Pre-filled with the recommended budget. Adjust if needed."
+    )
+    
+    if budget < suggestions['budget_floor']:
+        st.warning(f"⚠️ Budget ({budget}h) is below the contractual floor ({suggestions['budget_floor']}h). The solver may fail.")
+    
     st.divider()
-
-    # 4. Mathematical Validation
-    required_shifts = get_required_shifts(username)
+    
+    # ── 5. PER-DAY SUGGESTIONS TABLE ──────────────────────
+    st.markdown("##### 📋 Daily Staffing Suggestions")
+    st.caption("Pre-filled using workforce analysis, contracts, availability, holidays and events. Adjust as needed.")
+    
+    rows = []
+    for day in suggestions['days']:
+        rows.append({
+            "Date": pd.Timestamp(day['date']),
+            "Start": time(7, 0),
+            "End": time(0, 0),
+            "Minimum Staff": day['suggested_min'],
+            "Maximum Employees": day['suggested_max'],
+            "Minimum closing staff": day['suggested_closing'],
+        })
+    
+    base = pd.DataFrame(rows)
+    edited = st.data_editor(base, use_container_width=True, hide_index=True)
+    
+    # ── 6. PER-DAY REASONING ──────────────────────────────
+    with st.expander("🧠 Why these numbers?"):
+        for day in suggestions['days']:
+            d = day['date']
+            impact = day['event_impact']
+            
+            # Color-code by event impact
+            if impact >= 8:
+                border_color = "#DC2626"
+            elif impact >= 5:
+                border_color = "#D97706"
+            elif impact >= 1:
+                border_color = "#16A34A"
+            else:
+                border_color = "#E2E8F0"
+            
+            reason_text = " · ".join(day['reasons'])
+            
+            st.markdown(f"""
+            <div style='border-left: 4px solid {border_color}; padding: 6px 12px; margin-bottom: 4px;
+                         background: #F8FAFC; border-radius: 4px; font-size: 0.85em;'>
+                <strong>{day['day_name']} {d.strftime('%d %b')}</strong> — 
+                Min: {day['suggested_min']} · Max: {day['suggested_max']} · Close: {day['suggested_closing']}
+                <br><span style='color: #64748B;'>{reason_text}</span>
+            </div>
+            """, unsafe_allow_html=True)
+    
+    st.divider()
+    
+    # ── 7. SHIFT BALANCE CHECK ────────────────────────────
+    required_shifts = suggestions['min_shifts_required']
     max_shifts_allowed = int(edited['Maximum Employees'].sum()) if 'Maximum Employees' in edited.columns else 0
     
     st.markdown("### ⚖️ Shift Balance Check")
@@ -494,7 +817,7 @@ def show_add_view():
     else:
         st.success("✅ Shift balance looks good! The AI solver will be able to process this.")
 
-    # 5. Save/Back Controls
+    # ── 8. SAVE / BACK ────────────────────────────────────
     col1, col2 = st.columns(2)
     with col1:
         if st.button("💾 Save New Week", type="primary", use_container_width=True, disabled=not can_save):
