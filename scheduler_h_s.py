@@ -415,18 +415,21 @@ def solve_rota_final_v14(sheet_id=None, target_weeks=None, username=None):
             if ENABLE_STRICT_SECOND_START:
                 if day_name == 'Sunday' and start_h == 6 and max_headcount >= 2:
                     model.Add(sum(work[(idx, date_str, 6)] for idx in emp_indices) == 1)
-                    if day_event and event_start_hour:
-                        prep_hour = max(7, event_start_hour - EVENT_PREP_HOURS)
-                        model.Add(sum(work[(idx, date_str, prep_hour)] for idx in emp_indices) >= min_rush_staff)
-                    else: model.Add(sum(work[(idx, date_str, 7)] for idx in emp_indices) >= 2)
-                        
-                elif start_h < second_start_earliest and end_h > second_start_latest and max_headcount >= 2:
-                    for h in range(start_h, second_start_earliest): model.Add(sum(work[(idx, date_str, h)] for idx in emp_indices) == 1)
+                    model.Add(sum(work[(idx, date_str, 7)] for idx in emp_indices) >= 2)
+                    
+                # FIX: Changed < to <= so it triggers correctly on High Impact days
+                elif start_h <= second_start_earliest and end_h >= second_start_latest and max_headcount >= 2:
+                    for h in range(start_h, second_start_earliest): 
+                        model.Add(sum(work[(idx, date_str, h)] for idx in emp_indices) == 1)
+                    
+                    # Force the second person to arrive by the 'latest' threshold
                     model.Add(sum(work[(idx, date_str, second_start_latest)] for idx in emp_indices) >= 2)
-                    if day_event and event_start_hour:
-                        prep_hour = max(start_h, event_start_hour - EVENT_PREP_HOURS)
-                        for h in range(prep_hour, min(event_start_hour + 2, end_h)): model.Add(sum(work[(idx, date_str, h)] for idx in emp_indices) >= min_rush_staff)
 
+            if day_event and event_start_hour:
+                prep_hour = max(start_h, event_start_hour - EVENT_PREP_HOURS)
+                for h in range(prep_hour, min(event_start_hour + 2, end_h)): 
+                    model.Add(sum(work[(idx, date_str, h)] for idx in emp_indices) >= min_rush_staff)
+            
             if ENABLE_RUSH_LOCK:
                 operating_hours = list(range(start_h, end_h))
                 for k in range(1, len(operating_hours) - 1):
