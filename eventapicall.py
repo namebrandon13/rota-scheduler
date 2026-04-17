@@ -12,7 +12,6 @@ import os
 # ==============================================================================
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-INPUT_EXCEL_FILE = os.path.join(BASE_DIR, 'Book(Employees)_01.xlsx')
 EVENTS_OUTPUT_FILE = os.path.join(BASE_DIR, 'EventsData.xlsx')
 
 # FILTERING
@@ -42,27 +41,6 @@ VENUE_DB = {
 #                               HELPER FUNCTIONS
 # ==============================================================================
 
-
-def get_dynamic_location(sheet_id, username):
-    from gsheets_db import get_user_data
-    import json
-    
-    df = get_user_data(sheet_id, "Users", username)
-    user_row = df[df['Username'] == username]
-    
-    if not user_row.empty and 'Location' in user_row.columns:
-        loc_str = user_row.iloc[0]['Location']
-        try:
-            # Parse the JSON string back into coordinates
-            data = json.loads(loc_str)
-            return data['lat'], data['lon']
-        except:
-            pass
-            
-    # Default Fallback
-    return 51.5458, -0.1033
-
-
 def haversine_distance(lat1, lon1, lat2, lon2):
     if lat2 == 0.0 or lat2 is None: return 0.0
     R = 3958.8 
@@ -73,7 +51,6 @@ def haversine_distance(lat1, lon1, lat2, lon2):
         math.sin(dLon/2) * math.sin(dLon/2)
     c = 2 * math.atan2(math.sqrt(a), math.sqrt(1-a))
     return R * c
-
 
 def get_event_details(url):
     """Visits a specific Eventbrite page to find the JSON-LD Schema."""
@@ -104,7 +81,6 @@ def get_event_details(url):
         pass
     return None, None, None
 
-
 def calculate_weighted_impact(row):
     footfall = row['Est. Footfall']
     dist = row['Distance (Miles)']
@@ -116,9 +92,7 @@ def calculate_weighted_impact(row):
     else: decay = 0.2
     return max(1, int(base * decay))
 
-
 def load_existing_events():
-    """Load existing events from EventsData.xlsx"""
     if not os.path.exists(EVENTS_OUTPUT_FILE):
         return pd.DataFrame()
     try:
@@ -128,33 +102,24 @@ def load_existing_events():
     except:
         return pd.DataFrame()
 
-
 def save_events(df_new, merge=True):
-    """Save events, optionally merging with existing data"""
     if merge:
         df_existing = load_existing_events()
         if not df_existing.empty:
-            # Convert dates for comparison
             df_new['Date'] = pd.to_datetime(df_new['Date']).dt.date
-            
-            # Remove duplicates from existing that match new data (by Date + Event Name)
             if not df_new.empty:
                 merge_keys = df_new[['Date', 'Event Name']].apply(tuple, axis=1).tolist()
                 df_existing = df_existing[
                     ~df_existing[['Date', 'Event Name']].apply(tuple, axis=1).isin(merge_keys)
                 ]
-            
-            # Combine
             df_combined = pd.concat([df_existing, df_new], ignore_index=True)
             df_combined = df_combined.drop_duplicates(subset=['Date', 'Event Name'])
             df_combined = df_combined.sort_values('Date')
             df_combined.to_excel(EVENTS_OUTPUT_FILE, index=False)
             return df_combined
     
-    # Just save new data
     df_new.to_excel(EVENTS_OUTPUT_FILE, index=False)
     return df_new
-
 
 # ==============================================================================
 #                               DATA SOURCES
@@ -172,13 +137,10 @@ def scrape_eventbrite(start_date, end_date, biz_lat, biz_lon):
     try:
         url = f"https://www.eventbrite.co.uk/d/{SEARCH_CITY_SLUG}/events/?start_date={start_date}&end_date={end_date}&page=1"
         response = requests.get(url, headers=headers, timeout=10)
-        
-        if response.status_code != 200: 
-            return []
+        if response.status_code != 200: return []
 
         soup = BeautifulSoup(response.content, 'html.parser')
         links = soup.find_all('a', href=True)
-        
         count = 0
         max_scan = 10
         
@@ -186,7 +148,6 @@ def scrape_eventbrite(start_date, end_date, biz_lat, biz_lon):
             href = link['href']
             if 'eventbrite.co.uk/e/' in href:
                 clean_url = href.split('?')[0]
-                
                 if clean_url not in seen_links:
                     seen_links.add(clean_url)
                     text = link.text.strip()
@@ -212,15 +173,11 @@ def scrape_eventbrite(start_date, end_date, biz_lat, biz_lon):
                         'Lon': lon_val, 
                         'Source': 'Eventbrite'
                     })
-                    
                     count += 1
                     if count >= max_scan: break
-                    
     except Exception as e: 
         print(f"    [!] Error scraping Eventbrite: {e}")
-        
     return events_list
-
 
 def get_ticketmaster_events(start_date, end_date, biz_lat, biz_lon):
     print(f"  > Pinging Ticketmaster ({start_date} to {end_date})...")
@@ -228,7 +185,6 @@ def get_ticketmaster_events(start_date, end_date, biz_lat, biz_lon):
     try:
         start_obj = datetime.strptime(start_date, "%Y-%m-%d")
         end_obj = datetime.strptime(end_date, "%Y-%m-%d") + timedelta(days=1)
-        
         api_start = start_obj.strftime('%Y-%m-%dT00:00:00Z')
         api_end = end_obj.strftime('%Y-%m-%dT23:59:59Z')
         
@@ -253,7 +209,6 @@ def get_ticketmaster_events(start_date, end_date, biz_lat, biz_lon):
                     if "Season Ticket" in name: continue 
                     ev_date = ev['dates']['start'].get('localDate', '')
                     time_str = ev['dates']['start'].get('localTime', '19:00')[:5]
-                    
                     venue_data = ev.get('_embedded', {}).get('venues', [{}])[0]
                     venue = venue_data.get('name', 'Unknown')
                     try:
@@ -281,38 +236,73 @@ def get_ticketmaster_events(start_date, end_date, biz_lat, biz_lon):
         print(f"    [!] Error with Ticketmaster: {e}")
     return events_list
 
-# ... keep parse_ics_feed exactly as it is ...
+def parse_ics_feed(start_date, end_date):
+    print(f"  > Reading Digital Calendars (ICS) ({start_date} to {end_date})...")
+    matches = []
+    for feed in CALENDAR_FEEDS:
+        try:
+            headers = {'User-Agent': 'Mozilla/5.0'}
+            response = requests.get(feed['url'], headers=headers, timeout=10)
+            events = re.findall(r'BEGIN:VEVENT(.*?)END:VEVENT', response.text, re.DOTALL)
+            for ev in events:
+                summary_search = re.search(r'SUMMARY:(.*)', ev)
+                start_search = re.search(r'DTSTART.*:(\d{8}T\d{6})', ev) 
+                if not start_search or not summary_search: continue
+                
+                raw_start = start_search.group(1)
+                dt_start = datetime.strptime(raw_start, '%Y%m%dT%H%M%S')
+                date_str = dt_start.strftime('%Y-%m-%d')
+                time_str = dt_start.strftime('%H:%M')
+                
+                if not (start_date <= date_str <= end_date): continue
+                
+                summary = summary_search.group(1).strip()
+                if " - " in summary: 
+                    home_team = summary.split(" - ")[0].strip()
+                elif " vs " in summary: 
+                    home_team = summary.split(" vs ")[0].strip()
+                else: 
+                    home_team = summary
 
-# ==============================================================================
-#                               MAIN SCAN FUNCTION
-# ==============================================================================
+                if "Arsenal" in home_team:
+                    matches.append({
+                        'Date': date_str, 
+                        'Start Time': time_str, 
+                        'End Time': (dt_start + timedelta(hours=2)).strftime('%H:%M'),
+                        'Duration': '2.0h', 
+                        'Event Name': summary, 
+                        'Venue': 'Emirates Stadium',
+                        'Est. Footfall': 60704, 
+                        'Lat': 51.5549, 
+                        'Lon': -0.1084, 
+                        'Source': 'ICS Feed'
+                    })
+        except Exception as e:
+            print(f"    [!] Error with ICS feed: {e}")
+            continue
+    return matches
 
 # ==============================================================================
 #                               MAIN SCAN FUNCTION
 # ==============================================================================
 
 def run_event_scan(sheet_id, username, start_date=None, end_date=None, merge=True):
-    # STATIC LOCATION: Completely bypassing Google Sheets database lookup
     biz_lat = BUSINESS_LAT
     biz_lon = BUSINESS_LONG
     
     print("--- STARTING EVENT SCAN ---")
-    
-    # Set default dates
     today = date.today()
     if start_date is None:
         start_date = today.strftime('%Y-%m-%d')
     if end_date is None:
         end_date = (today + timedelta(days=30)).strftime('%Y-%m-%d')
     
-    # Ensure we don't scan past dates
     start_dt = datetime.strptime(start_date, '%Y-%m-%d').date()
     if start_dt < today:
         start_date = today.strftime('%Y-%m-%d')
     
     print(f"  Scan Range: {start_date} to {end_date}")
     
-    # Pass static coordinates into APIs
     tm = get_ticketmaster_events(start_date, end_date, biz_lat, biz_lon)
     ics = parse_ics_feed(start_date, end_date)
     eb = scrape_eventbrite(start_date, end_date, biz_lat, biz_lon)
@@ -325,27 +315,19 @@ def run_event_scan(sheet_id, username, start_date=None, end_date=None, merge=Tru
 
     df = pd.DataFrame(all_events)
     
-    # Calculate distance using static coordinates
     df['Distance (Miles)'] = df.apply(
         lambda x: haversine_distance(biz_lat, biz_lon, x['Lat'], x['Lon']), 
         axis=1
     )
     
-    # Filter by radius
     df = df[df['Distance (Miles)'] <= RADIUS_MILES]
-    
-    # Calculate impact
     df['Impact Score'] = df.apply(calculate_weighted_impact, axis=1)
     
-    # Filter by minimum impact
     initial_count = len(df)
     df = df[df['Impact Score'] >= MIN_IMPACT_THRESHOLD]
     dropped_count = initial_count - len(df)
-    
-    # Remove duplicates
     df = df.drop_duplicates(subset=['Date', 'Event Name'])
     
-    # Save (merge or replace)
     if not df.empty:
         save_events(df, merge=merge)
     
@@ -355,15 +337,12 @@ def run_event_scan(sheet_id, username, start_date=None, end_date=None, merge=Tru
     
     return df
 
-
 def scan_week(sheet_id, username, week_start_date):
     if isinstance(week_start_date, str):
         ws = datetime.strptime(week_start_date, '%Y-%m-%d').date()
     else:
         ws = week_start_date
-    
     we = ws + timedelta(days=6)
-    
     return run_event_scan(
         sheet_id=sheet_id, 
         username=username,
@@ -372,11 +351,9 @@ def scan_week(sheet_id, username, week_start_date):
         merge=True
     )
 
-
 def scan_live(sheet_id, username, days_ahead=30):
     today = date.today()
     end = today + timedelta(days=days_ahead)
-    
     return run_event_scan(
         sheet_id=sheet_id, 
         username=username,
@@ -385,11 +362,6 @@ def scan_live(sheet_id, username, days_ahead=30):
         merge=True
     )
 
-
-# ==============================================================================
-#                               STANDALONE EXECUTION
-# ==============================================================================
-
 if __name__ == "__main__":
-    # When run directly, scan today + 30 days
-    scan_live(30)
+    # Test execution (will fail without sheet_id/username, meant for UI call)
+    pass
