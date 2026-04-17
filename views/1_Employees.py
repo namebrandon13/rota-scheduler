@@ -472,79 +472,6 @@ def show_edit_view():
                 if st.checkbox(day[:3], value=(day in unavail_days_list), key=f"unavail_{day}"):
                     selected_unavail_days.append(day)
         
-        # Daily Available Hours (optional per-day time windows)
-        st.markdown("")
-        st.markdown("**🕐 Daily Availability Windows** *(optional)*")
-        st.caption("Restrict which hours an employee can work on specific days. Useful for part-time students or dual-job staff.")
-        
-        # Parse existing daily availability data
-        current_daily_avail_raw = str(emp.get('Daily Available Hours', ''))
-        has_daily_avail = current_daily_avail_raw not in ['', 'nan', 'None']
-        
-        # Parse into dict: {DayName: (start_hour, end_hour)}
-        existing_avail = {}
-        if has_daily_avail:
-            for item in current_daily_avail_raw.split(";"):
-                parts = item.strip().split("|")
-                if len(parts) == 3:
-                    try:
-                        day_n = parts[0].strip()
-                        sh = int(parts[1].split(":")[0])
-                        eh = int(parts[2].split(":")[0])
-                        if eh == 0: eh = 24
-                        existing_avail[day_n] = (sh, eh)
-                    except:
-                        pass
-        
-        daily_avail_enabled = st.checkbox(
-            "Enable daily availability restrictions",
-            value=has_daily_avail,
-            key="daily_avail_toggle",
-            help="When enabled, you can set the earliest start and latest finish for specific days"
-        )
-        
-        daily_avail_entries = {}
-        if daily_avail_enabled:
-            for day in days:
-                if day in selected_unavail_days:
-                    continue  # skip days they can't work at all
-                
-                existing_day = existing_avail.get(day, None)
-                
-                da_cols = st.columns([2, 1, 1.5, 1.5])
-                with da_cols[0]:
-                    st.markdown(f"**{day}**")
-                with da_cols[1]:
-                    day_has_restriction = st.checkbox(
-                        "Set",
-                        value=(existing_day is not None),
-                        key=f"da_toggle_{day}",
-                        label_visibility="collapsed"
-                    )
-                if day_has_restriction:
-                    with da_cols[2]:
-                        da_start = st.time_input(
-                            "Earliest",
-                            value=time(existing_day[0], 0) if existing_day else time(7, 0),
-                            key=f"da_start_{day}",
-                            help=f"Earliest they can start on {day}"
-                        )
-                    with da_cols[3]:
-                        da_end = st.time_input(
-                            "Latest",
-                            value=time(existing_day[1] if existing_day and existing_day[1] < 24 else 0, 0) if existing_day else time(0, 0),
-                            key=f"da_end_{day}",
-                            help=f"Latest they can finish on {day} (00:00 = midnight)"
-                        )
-                        end_hour = da_end.hour if da_end.hour != 0 else 24
-                    daily_avail_entries[day] = (da_start.hour, end_hour)
-        
-        # Build the storage string
-        daily_avail_str = ";".join(
-            f"{d}|{s:02d}:00|{e:02d}:00" if e < 24 else f"{d}|{s:02d}:00|00:00"
-            for d, (s, e) in daily_avail_entries.items()
-        ) if daily_avail_entries else ''
-        
         st.divider()
         st.subheader("⏰ Shift Preferences")
         
@@ -633,6 +560,86 @@ def show_edit_view():
                 delete = st.form_submit_button("🗑️ Delete", use_container_width=True)
             else:
                 delete = False
+    
+    # ==================================================
+    # DAILY AVAILABILITY (outside form for interactive toggle)
+    # ==================================================
+    st.divider()
+    st.markdown("**🕐 Daily Availability Windows** *(optional)*")
+    st.caption("Restrict which hours an employee can work on specific days. Useful for part-time students or dual-job staff.")
+    
+    # Parse existing daily availability data from loaded employee
+    current_daily_avail_raw = str(emp.get('Daily Available Hours', ''))
+    has_daily_avail = current_daily_avail_raw not in ['', 'nan', 'None']
+    
+    existing_avail = {}
+    if has_daily_avail:
+        for item in current_daily_avail_raw.split(";"):
+            parts = item.strip().split("|")
+            if len(parts) == 3:
+                try:
+                    day_n = parts[0].strip()
+                    sh = int(parts[1].split(":")[0])
+                    eh = int(parts[2].split(":")[0])
+                    if eh == 0: eh = 24
+                    existing_avail[day_n] = (sh, eh)
+                except:
+                    pass
+    
+    # Read unavailable days from loaded employee data (form hasn't submitted yet)
+    loaded_unavail = str(emp.get('Unavailable Days', ''))
+    unavail_for_da = [d.strip() for d in loaded_unavail.split(',') if d.strip() and d.strip() != 'nan']
+    
+    days_list = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday']
+    
+    daily_avail_enabled = st.checkbox(
+        "Enable daily availability restrictions",
+        value=has_daily_avail,
+        key="daily_avail_toggle",
+        help="When enabled, you can set the earliest start and latest finish for specific days"
+    )
+    
+    daily_avail_entries = {}
+    if daily_avail_enabled:
+        for day in days_list:
+            if day in unavail_for_da:
+                continue  # skip days they can't work at all
+            
+            existing_day = existing_avail.get(day, None)
+            
+            da_cols = st.columns([2, 1, 1.5, 1.5])
+            with da_cols[0]:
+                st.markdown(f"**{day}**")
+            with da_cols[1]:
+                day_has_restriction = st.checkbox(
+                    "Set",
+                    value=(existing_day is not None),
+                    key=f"da_toggle_{day}",
+                    label_visibility="collapsed"
+                )
+            if day_has_restriction:
+                with da_cols[2]:
+                    da_start = st.time_input(
+                        "Earliest",
+                        value=time(existing_day[0], 0) if existing_day else time(7, 0),
+                        key=f"da_start_{day}",
+                        help=f"Earliest they can start on {day}"
+                    )
+                with da_cols[3]:
+                    da_end = st.time_input(
+                        "Latest",
+                        value=time(existing_day[1] if existing_day and existing_day[1] < 24 else 0, 0) if existing_day else time(0, 0),
+                        key=f"da_end_{day}",
+                        help=f"Latest they can finish on {day} (00:00 = midnight)"
+                    )
+                    end_hour = da_end.hour if da_end.hour != 0 else 24
+                daily_avail_entries[day] = (da_start.hour, end_hour)
+    
+    # Build the storage string
+    daily_avail_str = ";".join(
+        f"{d}|{s:02d}:00|{e:02d}:00" if e < 24 else f"{d}|{s:02d}:00|00:00"
+        for d, (s, e) in daily_avail_entries.items()
+    ) if daily_avail_entries else ''
     
     # Handle form submission
     if submitted:
