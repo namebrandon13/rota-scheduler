@@ -3,17 +3,15 @@ import pandas as pd
 import os
 import calendar
 from datetime import datetime, date, time, timedelta
-import pydeck as pdk
 import math
 
-# Import your new database handler
+# Import database handler
 from gsheets_db import get_user_data, write_user_data
 
 # ======================================================
 # AUTH & SETUP
 # ======================================================
 
-# Verify user is logged in and has a sheet ID AND username assigned
 if 'sheet_id' not in st.session_state or 'username' not in st.session_state:
     st.error("Please log in to access the Scheduling Management.")
     st.stop()
@@ -22,9 +20,26 @@ sheet_id = st.session_state['sheet_id']
 username = st.session_state['username']
 SHEET_TEMPLATE = "Shift Template"
 SHEET_EVENTS = "Events"
-SHEET_EMPLOYEES = "Employees" # Added to fetch contract hours
+SHEET_EMPLOYEES = "Employees"
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+# ======================================================
+# EVENT-BASED STAFFING CONFIGURATION
+# ======================================================
+
+# Default staffing levels (no event)
+DEFAULT_MIN_STAFF = 4
+DEFAULT_MAX_EMPLOYEES = 6
+DEFAULT_MIN_CLOSING = 2
+
+# Event impact adjustments
+STAFFING_BY_IMPACT = {
+    "high": {"min_staff": 5, "max_employees": 8, "min_closing": 3},    # Impact 8-10
+    "medium": {"min_staff": 4, "max_employees": 7, "min_closing": 2},  # Impact 5-7
+    "low": {"min_staff": 4, "max_employees": 6, "min_closing": 2},     # Impact 1-4
+    "none": {"min_staff": 4, "max_employees": 6, "min_closing": 2},    # No event
+}
 
 # ======================================================
 # IMPORT EVENT SCANNER
@@ -96,6 +111,14 @@ div[data-testid="stMetric"]{
     font-weight:800;
     margin-bottom:4px;
 }
+.adjusted-row{
+    background:#FEF3C7;
+    border-left:3px solid #F59E0B;
+    padding:4px 8px;
+    margin:2px 0;
+    border-radius:4px;
+    font-size:0.85em;
+}
 </style>
 """
 st.markdown(SHARED_CSS, unsafe_allow_html=True)
@@ -128,6 +151,24 @@ def get_week_start(d):
         d = d.date()
     return d - timedelta(days=d.weekday())
 
+
+def get_impact_level(score):
+    """Convert numeric impact score to level string."""
+    if score >= 8:
+        return "high"
+    elif score >= 5:
+        return "medium"
+    elif score >= 1:
+        return "low"
+    return "none"
+
+
+def get_staffing_for_impact(impact_score):
+    """Get staffing requirements based on event impact score."""
+    level = get_impact_level(impact_score)
+    return STAFFING_BY_IMPACT[level]
+
+
 @st.cache_data(ttl=10)
 def load_all(user):
     try:
@@ -138,28 +179,47 @@ def load_all(user):
         df.columns = df.columns.str.strip()
         df["Date"] = pd.to_datetime(df["Date"])
         for col in ["Start", "End"]:
-            try:
-                df[col] = pd.to_datetime(df[col].astype(str)).dt.time
-            except:
-                pass
+            if col in df.columns:
+                try:
+                    df[col] = pd.to_datetime(df[col].astype(str)).dt.time
+                except:
+                    pass
         return df
     except Exception as e:
         st.error(f"Error loading schedule: {e}")
         return pd.DataFrame()
 
+
 def load_events_for_week(ws, user):
+    """Load events for a specific week and return DataFrame + dict by date."""
     try:
         df = get_user_data(sheet_id, SHEET_EVENTS, user)
         if df.empty:
-            return pd.DataFrame()
-            
+            return pd.DataFrame(), {}
+        
         df['Date'] = pd.to_datetime(df['Date']).dt.date
         we = ws + timedelta(days=6)
         df = df[(df['Date'] >= ws) & (df['Date'] <= we)]
-        return df.sort_values('Date')
+        df = df.sort_values('Date')
+        
+        # Create dict mapping date -> highest impact event for that day
+        events_by_date = {}
+        for _, row in df.iterrows():
+            d = row['Date']
+            impact = int(row.get('Impact Score', 0))
+            if d not in events_by_date or impact > events_by_date[d]['impact']:
+                events_by_date[d] = {
+                    'impact': impact,
+                    'name': row.get('Event Name', 'Event'),
+                    'venue': row.get('Venue', ''),
+                    'start_time': row.get('Start Time', '')
+                }
+        
+        return df, events_by_date
     except Exception as e:
         st.error(f"Error loading events: {e}")
-        return pd.DataFrame()
+        return pd.DataFrame(), {}
+
 
 @st.cache_data(ttl=10)
 def get_required_shifts(user):
@@ -172,7 +232,7 @@ def get_required_shifts(user):
             try:
                 h = float(hrs)
                 if pd.isna(h): return 0
-                return math.ceil(h / 9.0) # Assuming 9 is MAX_SHIFT_LENGTH
+                return math.ceil(h / 9.0)
             except: return 0
         
         if 'Minimum Contractual Hours' in df.columns:
@@ -180,6 +240,7 @@ def get_required_shifts(user):
         return 0
     except:
         return 0
+
 
 def save_all(df, user):
     try:
@@ -198,6 +259,7 @@ def save_all(df, user):
     except Exception as e:
         st.error(f"Error saving to Google Sheets: {e}")
 
+
 def nav_to(view, ws=None):
     st.session_state.sched_view = view
     if ws is not None:
@@ -207,20 +269,24 @@ def nav_to(view, ws=None):
         st.session_state.events_scanned = False
     st.rerun()
 
+
 def week_label(ws):
     we = ws + timedelta(days=6)
     wn = (ws + timedelta(days=3)).isocalendar()[1]
     return f"Week {wn} · {ws.strftime('%d %b')} – {we.strftime('%d %b %Y')}"
+
 
 def impact_color(score):
     if score >= 8: return "#DC2626"
     elif score >= 5: return "#D97706"
     return "#16A34A"
 
+
 def impact_label(score):
     if score >= 8: return "HIGH"
     elif score >= 5: return "MEDIUM"
     return "LOW"
+
 
 def display_compact_events(events_df):
     """A clean, compact event display for the Edit/Add screens."""
@@ -246,6 +312,51 @@ def display_compact_events(events_df):
         </div>
         """, unsafe_allow_html=True)
 
+
+def build_week_template_with_events(ws, events_by_date):
+    """
+    Build a week template with staffing auto-adjusted based on events.
+    Returns DataFrame and list of adjustment notes.
+    """
+    rows = []
+    adjustments = []
+    
+    for i in range(7):
+        day_date = ws + timedelta(days=i)
+        
+        # Check if there's an event on this day
+        event_info = events_by_date.get(day_date, None)
+        
+        if event_info:
+            impact = event_info['impact']
+            staffing = get_staffing_for_impact(impact)
+            level = get_impact_level(impact)
+            
+            if level in ["high", "medium"]:
+                adjustments.append({
+                    'date': day_date,
+                    'day_name': day_date.strftime('%A'),
+                    'event_name': event_info['name'],
+                    'impact': impact,
+                    'level': level.upper(),
+                    'min_staff': staffing['min_staff'],
+                    'max_employees': staffing['max_employees']
+                })
+        else:
+            staffing = STAFFING_BY_IMPACT["none"]
+        
+        rows.append({
+            "Date": pd.Timestamp(day_date),
+            "Start": time(7, 0),
+            "End": time(0, 0),  # Midnight (00:00)
+            "Minimum Staff": staffing['min_staff'],
+            "Maximum Employees": staffing['max_employees'],
+            "Minimum closing staff": staffing['min_closing']
+        })
+    
+    return pd.DataFrame(rows), adjustments
+
+
 # ======================================================
 # SIDEBAR
 # ======================================================
@@ -254,6 +365,7 @@ def get_sched_weeks(user):
     df = load_all(user)
     if df.empty: return set()
     return {get_week_start(d) for d in df["Date"]}
+
 
 def render_sidebar():
     sw = get_sched_weeks(username)
@@ -355,21 +467,17 @@ def show_week_view():
     wd = wd.drop(columns=["_ws_str"])
     budget = int(wd["Budget"].max()) if "Budget" in wd.columns else 300
     
-    # 1. Budget Input
     new_budget = st.number_input("Weekly Budget (hours)", value=budget, min_value=0, max_value=3000)
     st.divider()
 
-    # 2. Contextual Events
-    events_df = load_events_for_week(ws, username)
+    events_df, _ = load_events_for_week(ws, username)
     display_compact_events(events_df)
     st.write("")
 
-    # 3. Editable Table
     st.markdown("##### 📋 Adjust Daily Requirements")
     edited = st.data_editor(wd, use_container_width=True, hide_index=True)
     st.divider()
 
-    # 4. Mathematical Validation
     required_shifts = get_required_shifts(username)
     max_shifts_allowed = int(edited['Maximum Employees'].sum()) if 'Maximum Employees' in edited.columns else 0
     
@@ -385,7 +493,6 @@ def show_week_view():
     else:
         st.success("✅ Shift balance looks good! The AI solver will be able to process this.")
 
-    # 5. Save/Back Controls
     c1, c2 = st.columns(2)
     with c1:
         if st.button("💾 Save Changes", type="primary", use_container_width=True, disabled=not can_save):
@@ -415,11 +522,13 @@ def show_add_view():
 
     st.markdown(f"<div class='page-title'>➕ {ws.strftime('%d %b')} – {we.strftime('%d %b')}</div>", unsafe_allow_html=True)
 
-    # 1. Budget
     budget = st.number_input("Weekly Budget (hours)", value=300, min_value=0, max_value=3000)
     st.divider()
 
-    # 2. Event Scanning & Display
+    # Event Scanning
+    events_df = pd.DataFrame()
+    events_by_date = {}
+    
     if ws >= today:
         col_scan1, col_scan2 = st.columns([3, 1])
         with col_scan2:
@@ -439,33 +548,54 @@ def show_add_view():
                         st.session_state.week_events = pd.DataFrame()
                         st.session_state.events_scanned = True
                 else:
-                    st.session_state.week_events = load_events_for_week(ws, username)
+                    events_df, events_by_date = load_events_for_week(ws, username)
+                    st.session_state.week_events = events_df
                     st.session_state.events_scanned = True
                 st.rerun()
         
-        events_df = st.session_state.week_events
+        # Get events for display and staffing calculation
+        if st.session_state.week_events is not None and not st.session_state.week_events.empty:
+            events_df = st.session_state.week_events
+            # Rebuild events_by_date from the DataFrame
+            events_df_copy = events_df.copy()
+            events_df_copy['Date'] = pd.to_datetime(events_df_copy['Date']).dt.date
+            for _, row in events_df_copy.iterrows():
+                d = row['Date']
+                impact = int(row.get('Impact Score', 0))
+                if d not in events_by_date or impact > events_by_date[d]['impact']:
+                    events_by_date[d] = {
+                        'impact': impact,
+                        'name': row.get('Event Name', 'Event'),
+                        'venue': row.get('Venue', ''),
+                        'start_time': row.get('Start Time', '')
+                    }
+        
         display_compact_events(events_df)
+    
     st.write("")
 
-    # 3. Editable Table
-    st.markdown("##### 📋 Setup Daily Requirements")
-    rows = []
-    for i in range(7):
-        day_date = ws + timedelta(days=i)
-        rows.append({
-            "Date": pd.Timestamp(day_date),
-            "Start": time(7, 0),
-            "End": time(22, 0),
-            "Minimum Staff": 4,
-            "Maximum Employees": 6,
-            "Minimum closing staff": 2
-        })
+    # Build template with event-based adjustments
+    base_df, adjustments = build_week_template_with_events(ws, events_by_date)
+    
+    # Show adjustment notifications
+    if adjustments:
+        st.markdown("##### ⚡ Auto-Adjusted Staffing")
+        for adj in adjustments:
+            color = "#DC2626" if adj['level'] == "HIGH" else "#D97706"
+            st.markdown(f"""
+            <div class='adjusted-row'>
+                <strong style='color:{color}'>⚠️ {adj['day_name']}</strong> - 
+                {adj['event_name']} ({adj['level']} IMPACT {adj['impact']}/10) → 
+                Min Staff: <strong>{adj['min_staff']}</strong>, Max: <strong>{adj['max_employees']}</strong>
+            </div>
+            """, unsafe_allow_html=True)
+        st.caption("💡 Staffing has been auto-adjusted based on event impact. You can still edit the values below.")
+        st.write("")
 
-    base = pd.DataFrame(rows)
-    edited = st.data_editor(base, use_container_width=True, hide_index=True)
+    st.markdown("##### 📋 Setup Daily Requirements")
+    edited = st.data_editor(base_df, use_container_width=True, hide_index=True)
     st.divider()
 
-    # 4. Mathematical Validation
     required_shifts = get_required_shifts(username)
     max_shifts_allowed = int(edited['Maximum Employees'].sum()) if 'Maximum Employees' in edited.columns else 0
     
@@ -481,7 +611,6 @@ def show_add_view():
     else:
         st.success("✅ Shift balance looks good! The AI solver will be able to process this.")
 
-    # 5. Save/Back Controls
     col1, col2 = st.columns(2)
     with col1:
         if st.button("💾 Save New Week", type="primary", use_container_width=True, disabled=not can_save):
