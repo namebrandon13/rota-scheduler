@@ -432,19 +432,19 @@ def show_add_view():
             with st.spinner("🔍 Scanning for events..."):
                 if scan_week:
                     try:
-                        scanned_df = scan_week(ws)
+                        # PASS THE NEW VARIABLES HERE
+                        scanned_df = scan_week(sheet_id, username, ws)
                         st.session_state.week_events = scanned_df
                         st.session_state.events_scanned = True
                     except Exception as e:
+                        # DONT HIDE THE ERROR, SHOW IT SO WE CAN DEBUG
+                        st.error(f"Event Scanner Error: {e}")
                         st.session_state.week_events = pd.DataFrame()
                         st.session_state.events_scanned = True
                 else:
                     st.session_state.week_events = load_events_for_week(ws, username)
                     st.session_state.events_scanned = True
                 st.rerun()
-        
-        events_df = st.session_state.week_events
-        display_compact_events(events_df)
     st.write("")
 
     # 3. Editable Table
