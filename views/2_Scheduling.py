@@ -419,49 +419,62 @@ def show_add_view():
     budget = st.number_input("Weekly Budget (hours)", value=300, min_value=0, max_value=3000)
     st.divider()
 
-    # 2. Event Scanning & Display
-    if ws >= today:
-        col_scan1, col_scan2 = st.columns([3, 1])
-        with col_scan2:
-            if st.button("🔄 Scan Events", use_container_width=True):
-                st.session_state.events_scanned = False
-                st.session_state.week_events = None
-                st.rerun()
+    # 2. Event Display (Pulled directly from your cloud database)
+    events_df = load_events_for_week(ws, username)
+    
+    if events_df.empty:
+        st.info("✅ No significant events found for this week in the database. (Go to the Events page to run a Live Scan if you need to fetch new ones).")
+    else:
+        display_compact_events(events_df)
         
-        if not st.session_state.events_scanned:
-            with st.spinner("🔍 Scanning for events..."):
-                if scan_week:
-                    try:
-                        # PASS THE NEW VARIABLES HERE
-                        scanned_df = scan_week(sheet_id, username, ws)
-                        st.session_state.week_events = scanned_df
-                        st.session_state.events_scanned = True
-                    except Exception as e:
-                        # DONT HIDE THE ERROR, SHOW IT SO WE CAN DEBUG
-                        st.error(f"Event Scanner Error: {e}")
-                        st.session_state.week_events = pd.DataFrame()
-                        st.session_state.events_scanned = True
-                else:
-                    st.session_state.week_events = load_events_for_week(ws, username)
-                    st.session_state.events_scanned = True
-                st.rerun()
     st.write("")
 
-    # 3. Editable Table
+    # 3. Editable Table (With Rule-Based AI)
     st.markdown("##### 📋 Setup Daily Requirements")
+    
+    # --- Simple AI Logic for Pre-filling ---
+    def apply_ai_rules(day_d, ev_df):
+        min_s = 4; max_s = 6; min_c = 2
+        if ev_df.empty: return min_s, max_s, min_c
+        
+        # Match events to this specific day
+        day_ev = ev_df[ev_df['Date'] == day_d]
+        if not day_ev.empty:
+            top_impact = int(day_ev['Impact Score'].max())
+            
+            if 5 <= top_impact < 8: max_s = 8
+            if top_impact >= 8: min_s = 6; max_s = 10
+            
+            # Closing rush logic
+            late = day_ev[day_ev['Start Time'].astype(str) >= "18:00"]
+            if not late.empty and top_impact >= 5:
+                min_c = 3
+                if top_impact >= 8: min_c = 4
+                
+        return min_s, max_s, min_c
+
+    # --- Build the Rows ---
     rows = []
     for i in range(7):
         day_date = ws + timedelta(days=i)
+        
+        # Ask AI for the numbers based on events
+        ai_min, ai_max, ai_close = apply_ai_rules(day_date, events_df)
+        
         rows.append({
             "Date": pd.Timestamp(day_date),
             "Start": time(7, 0),
             "End": time(22, 0),
-            "Minimum Staff": 4,
-            "Maximum Employees": 6,
-            "Minimum closing staff": 2
+            "Minimum Staff": ai_min,
+            "Maximum Employees": ai_max,
+            "Minimum closing staff": ai_close
         })
 
     base = pd.DataFrame(rows)
+    
+    if not events_df.empty:
+        st.info("💡 AI has pre-filled the table below based on the Event Impact Scores.")
+        
     edited = st.data_editor(base, use_container_width=True, hide_index=True)
     st.divider()
 
