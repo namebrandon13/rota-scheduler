@@ -368,6 +368,32 @@ def solve_rota_final_v14(sheet_id=None, target_weeks=None, username=None):
                         for h in range(start_h, end_h):
                             if h < 10 or h >= 20: model.Add(work[(idx, date_str, h)] == 0)
 
+        # --- DAILY AVAILABILITY WINDOWS ---
+        # Restricts employees to only work within their available hours on specific days.
+        # Uses the same format as Fixed Weekly Shift: DayName|HH:MM|HH:MM;...
+        for idx in emp_indices:
+            emp = employees[idx]
+            daily_avail_raw = str(emp.get('Daily Available Hours', ''))
+            if daily_avail_raw not in ['', 'nan', 'None']:
+                avail_map = parse_fixed_shifts(daily_avail_raw)  # Same format, reuse parser
+                if avail_map:
+                    for _, row in week_data.iterrows():
+                        date_str = row['Date'].strftime('%Y-%m-%d')
+                        day_name = row['Date'].day_name()
+                        
+                        if day_name not in avail_map:
+                            continue  # No restriction on this day
+                        
+                        avail_start, avail_end = avail_map[day_name]
+                        shop_start = pd.to_datetime(str(row['Start'])).hour
+                        shop_end = pd.to_datetime(str(row['End'])).hour
+                        if shop_end == 0: shop_end = 24
+                        
+                        # Block all hours outside the availability window
+                        for h in range(shop_start, shop_end):
+                            if h < avail_start or h >= avail_end:
+                                model.Add(work[(idx, date_str, h)] == 0)
+
         for idx in emp_indices:
             for i in range(len(dates_in_order) - 1):
                 today = dates_in_order[i]
