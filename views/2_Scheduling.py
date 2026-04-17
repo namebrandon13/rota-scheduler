@@ -203,13 +203,19 @@ AVG_SHIFT_LENGTH = 7.5   # midpoint of 6-9 hour shifts
 MIN_SHIFT_LENGTH = 6
 MAX_SHIFT_LENGTH = 9
 
-def build_smart_suggestions(ws, user):
+def build_smart_suggestions(ws, user, target_budget=None):
     """
     Analyses the full workforce picture and returns intelligent per-day
     staffing suggestions plus a recommended weekly budget.
     
-    Uses: employee roster, contracts, availability, holidays, events,
-    fixed shifts, daily availability windows, and day-of-week patterns.
+    When target_budget is provided, recalculates everything under budget
+    pressure — fewer shifts on quiet days, dampened event response, but
+    still prioritises high-impact events.
+    
+    HARD RULES (never broken):
+      1. Store opens at 07:00, closes at 00:00
+      2. Minimum 2 closing staff every day
+      3. Second employee starts at 09:00 or 10:00 (enforced by solver)
     """
 
     # ── 1. LOAD ALL DATA ──────────────────────────────────
@@ -254,13 +260,31 @@ def build_smart_suggestions(ws, user):
     # ── 3. LOAD EVENTS ────────────────────────────────────
     events_df = load_events_for_week(ws, user)
     
-    # ── 4. PER-DAY ANALYSIS ───────────────────────────────
-    # Base daily shifts from contracts:
-    # "If we must deliver total_min_hours across 7 days, how many shifts/day?"
+    # ── 4. NATURAL BUDGET (always computed for reference) ─
     contract_daily_base = total_min_hours / 7.0 / AVG_SHIFT_LENGTH
+    natural_staffing = sum(
+        max(2, math.ceil(contract_daily_base * DOW_WEIGHTS[dow]))
+        for dow in range(7)
+    ) * AVG_SHIFT_LENGTH
+    natural_recommended = math.ceil(natural_staffing * 1.12)
+    natural_recommended = max(natural_recommended, math.ceil(total_min_hours * 1.12))
+    budget_floor = math.ceil(total_min_hours)
+    budget_ceiling = math.ceil(total_max_hours)
     
+    # ── 5. BUDGET PRESSURE ────────────────────────────────
+    # pressure < 1.0 = tight budget → reduce shifts, dampen events
+    # pressure = 1.0 = recommended → normal behaviour
+    # pressure > 1.0 = generous → can staff up
+    if target_budget is not None and natural_recommended > 0:
+        pressure = target_budget / natural_recommended
+        pressure = max(0.3, min(pressure, 2.0))
+    else:
+        pressure = 1.0
+    
+    # ── 6. PER-DAY ANALYSIS ───────────────────────────────
     day_suggestions = []
     total_event_padding_hours = 0
+    total_dow_weight = sum(DOW_WEIGHTS[d] for d in range(7))
     
     for i in range(7):
         day_date = ws + timedelta(days=i)
@@ -269,7 +293,7 @@ def build_smart_suggestions(ws, user):
         
         # ── Who is available this day? ──
         available_names = []
-        fixed_working_count = 0   # people with fixed shifts on this day
+        fixed_working_count = 0
         
         for _, emp in emp_df.iterrows():
             emp_name = str(emp.get('Name', '')).strip()
@@ -308,68 +332,97 @@ def build_smart_suggestions(ws, user):
                     late = day_ev[day_ev['Start Time'].astype(str) >= "17:00"]
                     day_event_is_evening = not late.empty
         
-        # ── Calculate suggested MINIMUM staff ──
-        # Start from contractual base, weighted by day-of-week
-        weighted_base = contract_daily_base * DOW_WEIGHTS[dow]
-        suggested_min = max(1, math.ceil(weighted_base))
+        # ══════════════════════════════════════════════════
+        # MINIMUM STAFF CALCULATION
+        # ══════════════════════════════════════════════════
+        
+        if target_budget is not None:
+            # BUDGET-DRIVEN: distribute target hours across days using DOW weights
+            day_budget_hours = (target_budget / total_dow_weight) * DOW_WEIGHTS[dow]
+            suggested_min = max(2, math.ceil(day_budget_hours / AVG_SHIFT_LENGTH))
+        else:
+            # NATURAL: contract-driven with DOW weighting
+            weighted_base = contract_daily_base * DOW_WEIGHTS[dow]
+            suggested_min = max(2, math.ceil(weighted_base))
         
         # Floor at fixed-shift employees (they're guaranteed in)
         suggested_min = max(suggested_min, fixed_working_count)
         
-        # Floor at 2 (can't practically run a shop alone all day)
-        if avail_count >= 2:
-            suggested_min = max(suggested_min, 2)
-        
-        # Event boost
+        # ── Event boost (scaled by budget pressure) ──
         event_bump = 0
         if day_event_impact >= 8:
-            # High: ensure at least 60% of available staff
-            event_floor = math.ceil(avail_count * 0.60)
-            event_bump = max(0, event_floor - suggested_min)
-            suggested_min = max(suggested_min, event_floor)
-        elif day_event_impact >= 5:
-            # Medium: bump by 1-2
-            event_bump = max(1, math.ceil(avail_count * 0.15))
-            suggested_min = suggested_min + event_bump
-        elif day_event_impact >= 1:
-            # Low: bump by 1 if room
+            # HIGH IMPACT: always boost, even under tight budget
+            if pressure >= 0.7:
+                event_floor = max(suggested_min + 2, math.ceil(avail_count * 0.50 * min(1.0, pressure)))
+                event_bump = max(1, event_floor - suggested_min)
+            else:
+                # Very tight: still give +1 for major events
+                event_bump = 1
+            suggested_min += event_bump
+        elif day_event_impact >= 5 and pressure >= 0.85:
+            # MEDIUM IMPACT: only boost if budget isn't too tight
             event_bump = 1
-            suggested_min = suggested_min + 1
+            suggested_min += 1
+        elif day_event_impact >= 1 and pressure >= 1.0:
+            # LOW IMPACT: only boost under comfortable budget
+            event_bump = 1
+            suggested_min += 1
+        
+        # HARD FLOOR: never below 2 (can't run a shop solo)
+        if avail_count >= 2:
+            suggested_min = max(2, suggested_min)
         
         # Cap at available staff
         suggested_min = min(suggested_min, avail_count)
         
-        # ── Calculate suggested MAXIMUM staff ──
-        # Give the solver breathing room above minimum
-        if day_event_impact >= 8:
-            headroom = 3
-        elif day_event_impact >= 5:
+        # ══════════════════════════════════════════════════
+        # MAXIMUM STAFF CALCULATION
+        # ══════════════════════════════════════════════════
+        
+        # Headroom scales with budget pressure
+        if pressure >= 1.0:
             headroom = 2
         else:
-            headroom = 2
+            headroom = 1   # tight budget = less solver wiggle room
+        
+        # High-impact events always get extra headroom
+        if day_event_impact >= 8:
+            headroom += 1
         
         suggested_max = min(avail_count, suggested_min + headroom)
-        suggested_max = max(suggested_max, suggested_min)  # sanity
+        suggested_max = max(suggested_max, suggested_min)
         
-        # ── Calculate suggested CLOSING staff ──
-        suggested_closing = 2
-        if day_event_is_evening and day_event_impact >= 8:
-            suggested_closing = 4
-        elif day_event_is_evening and day_event_impact >= 5:
+        # ══════════════════════════════════════════════════
+        # CLOSING STAFF — HARD RULE: ALWAYS >= 2
+        # ══════════════════════════════════════════════════
+        
+        suggested_closing = 2   # ABSOLUTE FLOOR — never broken
+        
+        # Only boost closers if budget allows AND evening event
+        if day_event_is_evening and day_event_impact >= 8 and pressure >= 0.7:
             suggested_closing = 3
-        elif dow in (4, 5):   # Fri/Sat evenings are busier
-            suggested_closing = min(2, suggested_min)
+        elif day_event_is_evening and day_event_impact >= 5 and pressure >= 0.9:
+            suggested_closing = 3
         
+        # Closers can't exceed total staff on shift
         suggested_closing = min(suggested_closing, suggested_min)
-        suggested_closing = max(suggested_closing, 1)
+        # Re-enforce the hard floor after the min() above
+        suggested_closing = max(suggested_closing, 2)
+        # If only 1 person available, that's the absolute physical limit
+        if avail_count < 2:
+            suggested_closing = min(suggested_closing, avail_count)
         
-        # ── Track event padding for budget ──
+        # ── Track event padding for budget display ──
         event_padding_hours = event_bump * AVG_SHIFT_LENGTH
         total_event_padding_hours += event_padding_hours
         
         # ── Reasoning text ──
         reasons = []
-        reasons.append(f"Contract base: {weighted_base:.1f} shifts")
+        if target_budget is not None:
+            day_hrs = (target_budget / total_dow_weight) * DOW_WEIGHTS[dow]
+            reasons.append(f"Budget share: {day_hrs:.0f}h")
+        else:
+            reasons.append(f"Contract base: {contract_daily_base * DOW_WEIGHTS[dow]:.1f} shifts")
         reasons.append(f"Available: {avail_count}/{total_staff} staff")
         if fixed_working_count:
             reasons.append(f"Fixed shifts: {fixed_working_count}")
@@ -377,7 +430,10 @@ def build_smart_suggestions(ws, user):
             absent = total_staff - avail_count
             reasons.append(f"Absent: {absent} (holiday/unavailable)")
         if day_event_impact:
-            reasons.append(f"Event: {day_event_name[:25]} (impact {day_event_impact}/10)")
+            dampened = " [dampened]" if pressure < 0.85 and day_event_impact < 8 else ""
+            reasons.append(f"Event: {day_event_name[:25]} ({day_event_impact}/10){dampened}")
+        if target_budget is not None and pressure < 1.0:
+            reasons.append(f"Budget pressure: {pressure:.0%}")
         
         day_suggestions.append({
             'date': day_date,
@@ -394,23 +450,14 @@ def build_smart_suggestions(ws, user):
             'reasons': reasons,
         })
     
-    # ── 5. BUDGET CALCULATION ─────────────────────────────
-    # Floor: contractual minimums (you MUST pay this no matter what)
-    budget_floor = math.ceil(total_min_hours)
-    
-    # Suggested: enough for the solver to place shifts optimally
+    # ── 7. BUDGET SUMMARY ─────────────────────────────────
     staffing_hours = sum(d['suggested_min'] * AVG_SHIFT_LENGTH for d in day_suggestions)
-    solver_buffer = math.ceil(staffing_hours * 0.12)   # 12% flexibility
+    solver_buffer = math.ceil(staffing_hours * 0.12)
     event_pad = math.ceil(total_event_padding_hours)
     budget_suggested = math.ceil(staffing_hours + solver_buffer + event_pad)
-    
-    # Ensure budget covers contractual floor
     budget_suggested = max(budget_suggested, budget_floor + solver_buffer)
     
-    # Ceiling: theoretical max if everyone worked max hours
-    budget_ceiling = math.ceil(total_max_hours)
-    
-    # ── 6. SHIFT BALANCE VALIDATION ───────────────────────
+    # ── 8. SHIFT BALANCE ──────────────────────────────────
     total_max_slots = sum(d['suggested_max'] for d in day_suggestions)
     min_shifts_required = sum(math.ceil(h / MAX_SHIFT_LENGTH) for h in emp_df['_min_hrs'] if h > 0)
     
@@ -430,6 +477,7 @@ def build_smart_suggestions(ws, user):
         'event_padding': event_pad,
         'min_shifts_required': min_shifts_required,
         'total_max_slots': total_max_slots,
+        'pressure': pressure,
     }
 
 def save_all(df, user):
@@ -683,11 +731,14 @@ def show_add_view():
         return
 
     we = ws + timedelta(days=6)
+    budget_key = f'budget_override_{ws}'
 
     st.markdown(f"<div class='page-title'>➕ {ws.strftime('%d %b')} – {we.strftime('%d %b')}</div>", unsafe_allow_html=True)
 
     # ── 1. GENERATE SMART SUGGESTIONS ─────────────────────
-    suggestions = build_smart_suggestions(ws, username)
+    # If manager has set a custom budget, recalculate with pressure
+    budget_override = st.session_state.get(budget_key, None)
+    suggestions = build_smart_suggestions(ws, username, target_budget=budget_override)
     
     if suggestions is None:
         st.error("No employees found. Please add employees first.")
@@ -741,22 +792,59 @@ def show_add_view():
         and handle edge cases without hitting a hard wall.*
         """)
     
-    budget = st.number_input(
-        "Weekly Budget (hours)",
-        value=suggestions['budget_suggested'],
-        min_value=0,
-        max_value=3000,
-        help="Pre-filled with the recommended budget. Adjust if needed."
-    )
+    # ── Budget input with REFRESH button ──
+    in1, in2, in3 = st.columns([3, 1, 1])
+    with in1:
+        budget = st.number_input(
+            "Weekly Budget (hours)",
+            value=budget_override if budget_override is not None else suggestions['budget_suggested'],
+            min_value=0,
+            max_value=3000,
+            help="Set your budget, then click Recalculate to adjust all staffing suggestions."
+        )
+    with in2:
+        st.write("")  # vertical alignment
+        if st.button("🔄 Recalculate", use_container_width=True,
+                      help="Recalculates min/max/closing for every day based on your budget"):
+            st.session_state[budget_key] = budget
+            st.rerun()
+    with in3:
+        st.write("")
+        if budget_override is not None:
+            if st.button("↩️ Reset", use_container_width=True,
+                          help="Reset to recommended budget"):
+                if budget_key in st.session_state:
+                    del st.session_state[budget_key]
+                st.rerun()
     
+    # ── Budget pressure feedback ──
     if budget < suggestions['budget_floor']:
-        st.warning(f"⚠️ Budget ({budget}h) is below the contractual floor ({suggestions['budget_floor']}h). The solver may fail.")
+        st.warning(f"⚠️ Budget ({budget}h) is below the contractual floor ({suggestions['budget_floor']}h). The solver may fail to meet minimum hours.")
+    
+    pressure = suggestions.get('pressure', 1.0)
+    if budget_override is not None:
+        if pressure < 0.75:
+            st.error(f"🔴 **Very tight budget** ({pressure:.0%} of recommended). "
+                     f"Staffing heavily reduced. Medium/low event impact ignored. Only high-impact events get a boost.")
+        elif pressure < 0.90:
+            st.warning(f"🟡 **Tight budget** ({pressure:.0%} of recommended). "
+                       f"Staffing reduced on quiet days. Low-impact events ignored.")
+        elif pressure < 1.05:
+            st.success(f"🟢 **Comfortable budget** ({pressure:.0%} of recommended). "
+                       f"All event impacts factored in.")
+        else:
+            st.success(f"🟢 **Generous budget** ({pressure:.0%} of recommended). "
+                       f"Full staffing with extra headroom.")
     
     st.divider()
     
     # ── 5. PER-DAY SUGGESTIONS TABLE ──────────────────────
     st.markdown("##### 📋 Daily Staffing Suggestions")
-    st.caption("Pre-filled using workforce analysis, contracts, availability, holidays and events. Adjust as needed.")
+    if budget_override is not None:
+        st.caption(f"Recalculated for {budget}h budget (pressure: {pressure:.0%}). "
+                   f"Hard rules enforced: Start 07:00 · End 00:00 · Min 2 closers.")
+    else:
+        st.caption("Pre-filled using workforce analysis, contracts, availability, holidays and events.")
     
     rows = []
     for day in suggestions['days']:
@@ -778,7 +866,6 @@ def show_add_view():
             d = day['date']
             impact = day['event_impact']
             
-            # Color-code by event impact
             if impact >= 8:
                 border_color = "#DC2626"
             elif impact >= 5:
@@ -831,10 +918,15 @@ def show_add_view():
 
             save_all(final, username)
             st.success("Week saved!")
+            # Clean up the override
+            if budget_key in st.session_state:
+                del st.session_state[budget_key]
             nav_to("calendar")
     
     with col2:
         if st.button("◀ Back", use_container_width=True):
+            if budget_key in st.session_state:
+                del st.session_state[budget_key]
             nav_to("calendar")
 
 # ======================================================
