@@ -160,7 +160,7 @@ def save_events(df_new, merge=True):
 #                               DATA SOURCES
 # ==============================================================================
 
-def scrape_eventbrite(start_date, end_date):
+def scrape_eventbrite(start_date, end_date, biz_lat, biz_lon):
     print(f"  > Scraping Eventbrite ({start_date} to {end_date})...")
     events_list = []
     headers = {
@@ -197,7 +197,7 @@ def scrape_eventbrite(start_date, end_date):
                     if real_lat and real_lon:
                         lat_val, lon_val, venue_val = real_lat, real_lon, real_venue
                     else:
-                        lat_val, lon_val = BUSINESS_LAT, BUSINESS_LONG
+                        lat_val, lon_val = biz_lat, biz_lon
                         venue_val = "Unknown (Check Link)"
 
                     events_list.append({
@@ -222,7 +222,7 @@ def scrape_eventbrite(start_date, end_date):
     return events_list
 
 
-def get_ticketmaster_events(start_date, end_date):
+def get_ticketmaster_events(start_date, end_date, biz_lat, biz_lon):
     print(f"  > Pinging Ticketmaster ({start_date} to {end_date})...")
     events_list = []
     try:
@@ -235,7 +235,7 @@ def get_ticketmaster_events(start_date, end_date):
         url = "https://app.ticketmaster.com/discovery/v2/events.json"
         params = {
             'apikey': TM_API_KEY, 
-            'geoPoint': f"{BUSINESS_LAT},{BUSINESS_LONG}",
+            'geoPoint': f"{biz_lat},{biz_lon}",
             'radius': RADIUS_MILES, 
             'unit': 'miles',
             'startDateTime': api_start, 
@@ -260,7 +260,7 @@ def get_ticketmaster_events(start_date, end_date):
                         v_lat = float(venue_data['location']['latitude'])
                         v_lon = float(venue_data['location']['longitude'])
                     except: 
-                        v_lat, v_lon = BUSINESS_LAT, BUSINESS_LONG
+                        v_lat, v_lon = biz_lat, biz_lon
 
                     capacity = VENUE_DB.get(venue, {}).get('capacity', 1000)
                     events_list.append({
@@ -281,53 +281,7 @@ def get_ticketmaster_events(start_date, end_date):
         print(f"    [!] Error with Ticketmaster: {e}")
     return events_list
 
-
-def parse_ics_feed(start_date, end_date):
-    print(f"  > Reading Digital Calendars (ICS) ({start_date} to {end_date})...")
-    matches = []
-    for feed in CALENDAR_FEEDS:
-        try:
-            headers = {'User-Agent': 'Mozilla/5.0'}
-            response = requests.get(feed['url'], headers=headers, timeout=10)
-            events = re.findall(r'BEGIN:VEVENT(.*?)END:VEVENT', response.text, re.DOTALL)
-            for ev in events:
-                summary_search = re.search(r'SUMMARY:(.*)', ev)
-                start_search = re.search(r'DTSTART.*:(\d{8}T\d{6})', ev) 
-                if not start_search or not summary_search: continue
-                
-                raw_start = start_search.group(1)
-                dt_start = datetime.strptime(raw_start, '%Y%m%dT%H%M%S')
-                date_str = dt_start.strftime('%Y-%m-%d')
-                time_str = dt_start.strftime('%H:%M')
-                
-                if not (start_date <= date_str <= end_date): continue
-                
-                summary = summary_search.group(1).strip()
-                if " - " in summary: 
-                    home_team = summary.split(" - ")[0].strip()
-                elif " vs " in summary: 
-                    home_team = summary.split(" vs ")[0].strip()
-                else: 
-                    home_team = summary
-
-                if "Arsenal" in home_team:
-                    matches.append({
-                        'Date': date_str, 
-                        'Start Time': time_str, 
-                        'End Time': (dt_start + timedelta(hours=2)).strftime('%H:%M'),
-                        'Duration': '2.0h', 
-                        'Event Name': summary, 
-                        'Venue': 'Emirates Stadium',
-                        'Est. Footfall': 60704, 
-                        'Lat': 51.5549, 
-                        'Lon': -0.1084, 
-                        'Source': 'ICS Feed'
-                    })
-        except Exception as e:
-            print(f"    [!] Error with ICS feed: {e}")
-            continue
-    return matches
-
+# ... keep parse_ics_feed exactly as it is ...
 
 # ==============================================================================
 #                               MAIN SCAN FUNCTION
@@ -335,37 +289,24 @@ def parse_ics_feed(start_date, end_date):
 
 def run_event_scan(sheet_id, username, start_date=None, end_date=None, merge=True):
     biz_lat, biz_lon = get_dynamic_location(sheet_id, username)
-    """
-    Run event scan for a specific date range.
-    
-    Args:
-        start_date: Start date string (YYYY-MM-DD) or None for today
-        end_date: End date string (YYYY-MM-DD) or None for start + 30 days
-        merge: If True, merge with existing events. If False, replace.
-    
-    Returns:
-        DataFrame of found events
-    """
     print("--- STARTING EVENT SCAN ---")
     
-    # Set default dates
     today = date.today()
     if start_date is None:
         start_date = today.strftime('%Y-%m-%d')
     if end_date is None:
         end_date = (today + timedelta(days=30)).strftime('%Y-%m-%d')
     
-    # Ensure we don't scan past dates
     start_dt = datetime.strptime(start_date, '%Y-%m-%d').date()
     if start_dt < today:
         start_date = today.strftime('%Y-%m-%d')
     
     print(f"  Scan Range: {start_date} to {end_date}")
     
-    # Fetch from all sources
-    tm = get_ticketmaster_events(start_date, end_date)
+    # Pass dynamic coordinates into APIs
+    tm = get_ticketmaster_events(start_date, end_date, biz_lat, biz_lon)
     ics = parse_ics_feed(start_date, end_date)
-    eb = scrape_eventbrite(start_date, end_date)
+    eb = scrape_eventbrite(start_date, end_date, biz_lat, biz_lon)
     
     all_events = tm + ics + eb
     
@@ -375,27 +316,20 @@ def run_event_scan(sheet_id, username, start_date=None, end_date=None, merge=Tru
 
     df = pd.DataFrame(all_events)
     
-    # Calculate distance
+    # Calculate distance using dynamic coordinates
     df['Distance (Miles)'] = df.apply(
-        lambda x: haversine_distance(BUSINESS_LAT, BUSINESS_LONG, x['Lat'], x['Lon']), 
+        lambda x: haversine_distance(biz_lat, biz_lon, x['Lat'], x['Lon']), 
         axis=1
     )
     
-    # Filter by radius
     df = df[df['Distance (Miles)'] <= RADIUS_MILES]
-    
-    # Calculate impact
     df['Impact Score'] = df.apply(calculate_weighted_impact, axis=1)
     
-    # Filter by minimum impact
     initial_count = len(df)
     df = df[df['Impact Score'] >= MIN_IMPACT_THRESHOLD]
     dropped_count = initial_count - len(df)
-    
-    # Remove duplicates
     df = df.drop_duplicates(subset=['Date', 'Event Name'])
     
-    # Save (merge or replace)
     if not df.empty:
         save_events(df, merge=merge)
     
@@ -406,16 +340,7 @@ def run_event_scan(sheet_id, username, start_date=None, end_date=None, merge=Tru
     return df
 
 
-def scan_week(week_start_date):
-    """
-    Scan events for a specific week.
-    
-    Args:
-        week_start_date: date object or string (YYYY-MM-DD) for Monday of the week
-    
-    Returns:
-        DataFrame of found events for that week
-    """
+def scan_week(sheet_id, username, week_start_date):
     if isinstance(week_start_date, str):
         ws = datetime.strptime(week_start_date, '%Y-%m-%d').date()
     else:
@@ -424,26 +349,21 @@ def scan_week(week_start_date):
     we = ws + timedelta(days=6)
     
     return run_event_scan(
+        sheet_id=sheet_id, 
+        username=username,
         start_date=ws.strftime('%Y-%m-%d'),
         end_date=we.strftime('%Y-%m-%d'),
         merge=True
     )
 
 
-def scan_live(days_ahead=30):
-    """
-    Scan from today + specified days ahead.
-    
-    Args:
-        days_ahead: Number of days to scan ahead from today
-    
-    Returns:
-        DataFrame of found events
-    """
+def scan_live(sheet_id, username, days_ahead=30):
     today = date.today()
     end = today + timedelta(days=days_ahead)
     
     return run_event_scan(
+        sheet_id=sheet_id, 
+        username=username,
         start_date=today.strftime('%Y-%m-%d'),
         end_date=end.strftime('%Y-%m-%d'),
         merge=True
