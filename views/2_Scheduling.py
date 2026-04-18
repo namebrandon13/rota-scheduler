@@ -657,9 +657,18 @@ def show_week_view():
     # Smart suggestion for budget comparison
     suggestions = build_smart_suggestions(ws, username)
     
-    # 1. Budget Input with smart hint
+    # 1. Budget Suggestion Panel
     if suggestions:
-        rec = suggestions['budget_suggested']
+        st.markdown("##### 💰 Suggested Weekly Budget")
+        
+        bc1, bc2, bc3 = st.columns(3)
+        bc1.metric("Floor", f"{suggestions['budget_floor']}h",
+                   help="Contractual minimum — you must pay at least this")
+        bc2.metric("Recommended", f"{suggestions['budget_suggested']}h",
+                   help="Gives the solver enough room to build an optimal rota")
+        bc3.metric("Ceiling", f"{suggestions['budget_ceiling']}h",
+                   help="Theoretical max if every employee worked maximum hours")
+        
         if budget < suggestions['budget_floor']:
             st.warning(f"⚠️ Current budget ({budget}h) is below the contractual floor ({suggestions['budget_floor']}h).")
         
@@ -668,7 +677,7 @@ def show_week_view():
             value=budget,
             min_value=0,
             max_value=3000,
-            help=f"💡 Recommended: {rec}h (floor: {suggestions['budget_floor']}h, ceiling: {suggestions['budget_ceiling']}h)"
+            help=f"💡 Recommended: {suggestions['budget_suggested']}h"
         )
     else:
         new_budget = st.number_input("Weekly Budget (hours)", value=budget, min_value=0, max_value=3000)
