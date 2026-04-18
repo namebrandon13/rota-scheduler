@@ -416,6 +416,30 @@ def solve_rota_final_v14(sheet_id=None, target_weeks=None, username=None):
                     if end_h == 0: end_h = 24
                     for h in range(start_h, end_h): model.Add(work[(idx, date_str, h)] == 0)
 
+            # --- Fair-share surplus calculation ---
+            # Compute total minimums to determine how much surplus exists
+            # and distribute it proportionally so no one employee hogs spare hours
+            total_contract_min = 0
+            emp_original_mins = {}
+            emp_original_maxs = {}
+            for idx in emp_indices:
+                emp = employees[idx]
+                try:
+                    if 'Minimum Contractual Hours' in emp: om = int(emp['Minimum Contractual Hours'])
+                    elif 'Minimum Contractual Hours ' in emp: om = int(emp['Minimum Contractual Hours '])
+                    else: om = 0
+                except: om = 0
+                ox = int(emp.get('Max Weekly Hours', 40))
+                emp_original_mins[idx] = om
+                emp_original_maxs[idx] = ox
+                total_contract_min += om
+            
+            # Surplus ratio: how much above minimum can each employee get
+            if total_contract_min > 0 and weekly_budget_hours < 9999:
+                surplus_ratio = max(0.0, (weekly_budget_hours - total_contract_min) / total_contract_min)
+            else:
+                surplus_ratio = 1.0  # No budget constraint effectively
+            
             # --- Contractual hours + fairness ---
             for idx in emp_indices:
                 emp = employees[idx]
@@ -432,14 +456,10 @@ def solve_rota_final_v14(sheet_id=None, target_weeks=None, username=None):
                 
                 max_physical_capacity = available_days_count * MAX_SHIFT_LENGTH
                 
-                try:
-                    if 'Minimum Contractual Hours' in emp: original_min = int(emp['Minimum Contractual Hours'])
-                    elif 'Minimum Contractual Hours ' in emp: original_min = int(emp['Minimum Contractual Hours '])
-                    else: original_min = 0 
-                except: original_min = 0
-                original_max = int(emp.get('Max Weekly Hours', 40))
+                original_min = emp_original_mins[idx]
+                original_max = emp_original_maxs[idx]
 
-                # PROPORTIONAL REDUCTION
+                # PROPORTIONAL REDUCTION (for failed attempts)
                 if reduction_pct > 0 and original_min > 0:
                     adjusted_min = max(0, math.floor(original_min * (1.0 - reduction_pct)))
                     adjusted_max = max(adjusted_min, math.floor(original_max * (1.0 - reduction_pct)))
@@ -447,7 +467,15 @@ def solve_rota_final_v14(sheet_id=None, target_weeks=None, username=None):
                     adjusted_min = original_min
                     adjusted_max = original_max
                 
+                # FAIR-SHARE CAP: even on Attempt 1, limit each employee's max
+                # so surplus is distributed proportionally, not dumped on one person
+                if surplus_ratio < 1.0 and adjusted_min > 0:
+                    fair_share_max = math.ceil(adjusted_min * (1.0 + surplus_ratio))
+                    # Don't exceed their actual contractual max
+                    adjusted_max = min(adjusted_max, fair_share_max)
+                
                 adjusted_min = min(adjusted_min, max_physical_capacity)
+                adjusted_max = max(adjusted_max, adjusted_min)  # sanity
 
                 total_hours_vars = [
                     work[(idx, row['Date'].strftime('%Y-%m-%d'), h)] 
