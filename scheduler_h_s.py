@@ -42,7 +42,7 @@ MORNING_END_HOUR = 12
 WEIGHT_UTILIZATION = 10
 WEIGHT_PREFERRED_DAY = 100      
 WEIGHT_PREFERRED_SLOT = 50      
-WEIGHT_FAIRNESS = 1
+WEIGHT_FAIRNESS = 2  # Quadratic load balancer — penalizes uneven hour distribution
 
 # --- GRADUATED SOLVER CONFIGS ---
 SOLVER_CONFIGS = [
@@ -434,11 +434,11 @@ def solve_rota_final_v14(sheet_id=None, target_weeks=None, username=None):
                 emp_original_maxs[idx] = ox
                 total_contract_min += om
             
-            # Surplus ratio: how much above minimum can each employee get
+            # Surplus: how many hours above total minimums does the budget allow?
             if total_contract_min > 0 and weekly_budget_hours < 9999:
-                surplus_ratio = max(0.0, (weekly_budget_hours - total_contract_min) / total_contract_min)
+                total_surplus = max(0, weekly_budget_hours - total_contract_min)
             else:
-                surplus_ratio = 1.0  # No budget constraint effectively
+                total_surplus = 9999
             
             # --- Contractual hours + fairness ---
             for idx in emp_indices:
@@ -467,11 +467,13 @@ def solve_rota_final_v14(sheet_id=None, target_weeks=None, username=None):
                     adjusted_min = original_min
                     adjusted_max = original_max
                 
-                # FAIR-SHARE CAP: even on Attempt 1, limit each employee's max
-                # so surplus is distributed proportionally, not dumped on one person
-                if surplus_ratio < 1.0 and adjusted_min > 0:
-                    fair_share_max = math.ceil(adjusted_min * (1.0 + surplus_ratio))
-                    # Don't exceed their actual contractual max
+                # FAIR-SHARE CAP: proportional share of surplus + 2h solver headroom
+                # The budget constraint prevents total overspend; this just stops
+                # one employee from hogging all surplus while others sit at their floor.
+                # The +2h ensures the solver always has room to manoeuvre.
+                if total_surplus < 9999 and adjusted_min > 0 and total_contract_min > 0:
+                    proportional_share = total_surplus * adjusted_min / total_contract_min
+                    fair_share_max = adjusted_min + max(2, math.ceil(proportional_share))
                     adjusted_max = min(adjusted_max, fair_share_max)
                 
                 adjusted_min = min(adjusted_min, max_physical_capacity)
