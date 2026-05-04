@@ -63,6 +63,16 @@ def get_event_params(impact_score):
     elif impact_score >= 1: return EVENT_THRESHOLDS[1]
     return EVENT_THRESHOLDS[0]
 
+def safe_int(val, default=0):
+    """Convert any value (including NaN, None, float, str) to int safely."""
+    try:
+        if val is None: return default
+        f = float(val)
+        if math.isnan(f) or math.isinf(f): return default
+        return int(f)
+    except (ValueError, TypeError):
+        return default
+
 def parse_fixed_shifts(raw):
     result = {}
     raw = str(raw).strip()
@@ -97,7 +107,7 @@ def load_events_for_dates(dates_list, df_ev):
                 start_time = str(row.get('Start Time', '12:00'))
                 try: start_hour = int(start_time.split(':')[0]) if ':' in start_time else 12
                 except: start_hour = 12
-                impact = int(row.get('Impact Score', 0))
+                impact = safe_int(row.get('Impact Score', 0), 0)
                 if d_str not in event_map or impact > event_map[d_str]['impact']:
                     event_map[d_str] = {
                         'impact': impact, 'start_hour': start_hour,
@@ -120,8 +130,7 @@ def _run_diagnostics(employees, emp_indices, week_data, dates_in_order,
     # 1. Budget vs total contractual minimums
     total_min = 0
     for idx in emp_indices:
-        try: total_min += int(employees[idx].get('Minimum Contractual Hours', 0))
-        except: pass
+        total_min += safe_int(employees[idx].get('Minimum Contractual Hours', 0), 0)
     
     if weekly_budget < total_min:
         issues.append(
@@ -133,7 +142,7 @@ def _run_diagnostics(employees, emp_indices, week_data, dates_in_order,
     for _, row in week_data.iterrows():
         date_str = row['Date'].strftime('%Y-%m-%d')
         day_name = row['Date'].day_name()
-        min_staff = int(row['Minimum Staff'])
+        min_staff = safe_int(row['Minimum Staff'], 0)
         
         available = 0
         for idx in emp_indices:
@@ -178,8 +187,7 @@ def _run_diagnostics(employees, emp_indices, week_data, dates_in_order,
         emp = employees[idx]
         emp_name = str(emp['Name']).strip()
         emp_id = str(emp['ID']).strip()
-        try: min_hrs = int(emp.get('Minimum Contractual Hours', 0))
-        except: min_hrs = 0
+        min_hrs = safe_int(emp.get('Minimum Contractual Hours', 0), 0)
         if min_hrs == 0: continue
         
         unavail = str(emp.get('Unavailable Days', ''))
@@ -243,7 +251,7 @@ def _run_diagnostics(employees, emp_indices, week_data, dates_in_order,
         except (ValueError, TypeError):
             override_val = 0
         try:
-            min_hrs = int(emp.get('Minimum Contractual Hours', 0))
+            min_hrs = safe_int(emp.get('Minimum Contractual Hours', 0), 0)
         except:
             min_hrs = 0
         if override_val > 0 and override_val < min_hrs:
@@ -450,24 +458,32 @@ def solve_rota_final_v14(sheet_id=None, target_weeks=None, username=None):
                 emp = employees[idx]
 
                 # Contractual minimum
-                try:
-                    if 'Minimum Contractual Hours' in emp: om = int(emp['Minimum Contractual Hours'])
-                    elif 'Minimum Contractual Hours ' in emp: om = int(emp['Minimum Contractual Hours '])
-                    else: om = 0
-                except: om = 0
+                if 'Minimum Contractual Hours' in emp:
+                    om = safe_int(emp['Minimum Contractual Hours'], 0)
+                elif 'Minimum Contractual Hours ' in emp:
+                    om = safe_int(emp['Minimum Contractual Hours '], 0)
+                else:
+                    om = 0
 
                 # Normal max from contract
-                normal_max = int(emp.get('Max Weekly Hours', 40))
+                normal_max = safe_int(emp.get('Max Weekly Hours', 40), 40)
+
+                # ── MAX HOURS OVERRIDE ──────────────────────────────────────
+                # If a non-zero override is set, it acts as a hard ceiling
+                # for this employee, replacing their normal max. The min
+                # is also clamped down to the override so the constraint
+                # min <= hours <= max remains satisfiable.
+                override_val = safe_int(emp.get('Max Hours Override', 0), 0)
+
+                # Normal max from contract
+                normal_max = safe_int(emp.get('Max Weekly Hours', 40), 40)
 
                 # ── MAX HOURS OVERRIDE ──────────────────────────────────
                 # If a non-zero override is set, it acts as a hard ceiling
                 # for this employee, replacing their normal max. The min
                 # is also clamped down to the override so the constraint
                 # min <= hours <= max remains satisfiable.
-                try:
-                    override_val = int(float(emp.get('Max Hours Override', 0) or 0))
-                except (ValueError, TypeError):
-                    override_val = 0
+                override_val = safe_int(emp.get('Max Hours Override', 0), 0)
 
                 if override_val > 0:
                     effective_max = min(normal_max, override_val)
@@ -512,7 +528,7 @@ def solve_rota_final_v14(sheet_id=None, target_weeks=None, username=None):
                     adjusted_min = max(0, math.floor(original_min * (1.0 - reduction_pct)))
                     # Only reduce max if no override is active — we respect the override
                     # as a hard intent signal and don't inflate it during relaxation
-                    override_active = int(float(emp.get('Max Hours Override', 0) or 0)) > 0
+                    override_active = safe_int(emp.get('Max Hours Override', 0), 0) > 0
                     if override_active:
                         adjusted_max = effective_max
                     else:
@@ -623,7 +639,7 @@ def solve_rota_final_v14(sheet_id=None, target_weeks=None, username=None):
             for i, row in week_data.iterrows():
                 date_str = row['Date'].strftime('%Y-%m-%d')
                 day_name = row['Date'].day_name()
-                manual_min = int(row['Minimum Staff'])
+                manual_min = safe_int(row['Minimum Staff'], 0)
                 
                 day_event = event_data.get(date_str, None)
                 event_impact = day_event['impact'] if day_event else 0
@@ -638,9 +654,9 @@ def solve_rota_final_v14(sheet_id=None, target_weeks=None, username=None):
                     sales_min = math.ceil(sales_val / REVENUE_PER_STAFF)
                 
                 final_min_headcount = max(manual_min, sales_min)
-                min_closing = int(row['Minimum closing staff'])
+                min_closing = safe_int(row['Minimum closing staff'], 1)
                 min_headcount = max(final_min_headcount, min_closing)
-                manual_max = int(row['Maximum Employees'])
+                manual_max = safe_int(row['Maximum Employees'], min_headcount)
                 if min_headcount > manual_max: min_headcount = manual_max
                 max_headcount = manual_max  
 
