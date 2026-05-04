@@ -241,30 +241,6 @@ def _run_diagnostics(employees, emp_indices, week_data, dates_in_order,
             f"limiting them to ~12h over any 2 consecutive days."
         )
     
-    # 7. Hours overrides reducing feasibility
-    override_issues = []
-    for idx in emp_indices:
-        emp = employees[idx]
-        emp_name = str(emp['Name']).strip()
-        try:
-            override_val = int(float(emp.get('Max Hours Override', 0) or 0))
-        except (ValueError, TypeError):
-            override_val = 0
-        try:
-            min_hrs = safe_int(emp.get('Minimum Contractual Hours', 0), 0)
-        except:
-            min_hrs = 0
-        if override_val > 0 and override_val < min_hrs:
-            override_issues.append(
-                f"{emp_name} (override {override_val}h < contract minimum {min_hrs}h)"
-            )
-    if override_issues:
-        issues.append(
-            f"⚠️ **Hours Override conflict:** The following employees have a Max Hours Override "
-            f"set below their contractual minimum, making their schedule mathematically impossible: "
-            + ", ".join(override_issues)
-            + ". Either raise the override or reduce the contractual minimum."
-        )
 
     # Fallback
     if not issues:
@@ -473,26 +449,8 @@ def solve_rota_final_v14(sheet_id=None, target_weeks=None, username=None):
                 # for this employee, replacing their normal max. The min
                 # is also clamped down to the override so the constraint
                 # min <= hours <= max remains satisfiable.
-                override_val = safe_int(emp.get('Max Hours Override', 0), 0)
 
-                # Normal max from contract
-                normal_max = safe_int(emp.get('Max Weekly Hours', 40), 40)
-
-                # ── MAX HOURS OVERRIDE ──────────────────────────────────
-                # If a non-zero override is set, it acts as a hard ceiling
-                # for this employee, replacing their normal max. The min
-                # is also clamped down to the override so the constraint
-                # min <= hours <= max remains satisfiable.
-                override_val = safe_int(emp.get('Max Hours Override', 0), 0)
-
-                if override_val > 0:
-                    effective_max = min(normal_max, override_val)
-                    # Clamp minimum down too if the override is tighter than the contract
-                    if om > effective_max:
-                        om = effective_max  # solver can't exceed the cap
-                else:
-                    effective_max = normal_max
-                # ────────────────────────────────────────────────────────
+                effective_max = normal_max
 
                 emp_original_mins[idx] = om
                 emp_effective_maxs[idx] = effective_max
@@ -526,13 +484,7 @@ def solve_rota_final_v14(sheet_id=None, target_weeks=None, username=None):
                 # PROPORTIONAL REDUCTION (for failed attempts)
                 if reduction_pct > 0 and original_min > 0:
                     adjusted_min = max(0, math.floor(original_min * (1.0 - reduction_pct)))
-                    # Only reduce max if no override is active — we respect the override
-                    # as a hard intent signal and don't inflate it during relaxation
-                    override_active = safe_int(emp.get('Max Hours Override', 0), 0) > 0
-                    if override_active:
-                        adjusted_max = effective_max
-                    else:
-                        adjusted_max = max(adjusted_min, math.floor(effective_max * (1.0 - reduction_pct)))
+                    adjusted_max = max(adjusted_min, math.floor(effective_max * (1.0 - reduction_pct)))
                 else:
                     adjusted_min = original_min
                     adjusted_max = effective_max
@@ -573,6 +525,10 @@ def solve_rota_final_v14(sheet_id=None, target_weeks=None, username=None):
                 if end_h == 0: end_h = 24
                 hours_range = list(range(start_h, end_h))
                 for idx in emp_indices:
+                    # Per-employee shift length cap: use Max Shift Length if set, else global max
+                    emp_max_shift_len = safe_int(employees[idx].get('Max Shift Length', 0), 0)
+                    effective_max_shift = min(MAX_SHIFT_LENGTH, emp_max_shift_len) if emp_max_shift_len > 0 else MAX_SHIFT_LENGTH
+
                     model.Add(sum(work[(idx, date_str, h)] for h in hours_range) > 0).OnlyEnforceIf(is_working_day[(idx, date_str)])
                     model.Add(sum(work[(idx, date_str, h)] for h in hours_range) == 0).OnlyEnforceIf(is_working_day[(idx, date_str)].Not())
                     for h in hours_range:
@@ -585,7 +541,7 @@ def solve_rota_final_v14(sheet_id=None, target_weeks=None, username=None):
                     duration = sum(work[(idx, date_str, h)] for h in hours_range)
                     model.Add(daily_end_hour[(idx, date_str)] == daily_start_hour[(idx, date_str)] + duration)
                     model.Add(duration >= min_shift_len).OnlyEnforceIf(is_working_day[(idx, date_str)])
-                    model.Add(duration <= MAX_SHIFT_LENGTH).OnlyEnforceIf(is_working_day[(idx, date_str)])
+                    model.Add(duration <= effective_max_shift).OnlyEnforceIf(is_working_day[(idx, date_str)])
 
             # --- Fixed slot ---
             for idx in emp_indices:
