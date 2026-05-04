@@ -233,6 +233,31 @@ def _run_diagnostics(employees, emp_indices, week_data, dates_in_order,
             f"limiting them to ~12h over any 2 consecutive days."
         )
     
+    # 7. Hours overrides reducing feasibility
+    override_issues = []
+    for idx in emp_indices:
+        emp = employees[idx]
+        emp_name = str(emp['Name']).strip()
+        try:
+            override_val = int(float(emp.get('Max Hours Override', 0) or 0))
+        except (ValueError, TypeError):
+            override_val = 0
+        try:
+            min_hrs = int(emp.get('Minimum Contractual Hours', 0))
+        except:
+            min_hrs = 0
+        if override_val > 0 and override_val < min_hrs:
+            override_issues.append(
+                f"{emp_name} (override {override_val}h < contract minimum {min_hrs}h)"
+            )
+    if override_issues:
+        issues.append(
+            f"⚠️ **Hours Override conflict:** The following employees have a Max Hours Override "
+            f"set below their contractual minimum, making their schedule mathematically impossible: "
+            + ", ".join(override_issues)
+            + ". Either raise the override or reduce the contractual minimum."
+        )
+
     # Fallback
     if not issues:
         issues.append(
@@ -416,24 +441,47 @@ def solve_rota_final_v14(sheet_id=None, target_weeks=None, username=None):
                     if end_h == 0: end_h = 24
                     for h in range(start_h, end_h): model.Add(work[(idx, date_str, h)] == 0)
 
-            # --- Fair-share surplus calculation ---
-            # Compute total minimums to determine how much surplus exists
-            # and distribute it proportionally so no one employee hogs spare hours
+            # --- Per-employee hours: collect originals (with override) ---
             total_contract_min = 0
             emp_original_mins = {}
-            emp_original_maxs = {}
+            emp_effective_maxs = {}   # Takes override into account
+
             for idx in emp_indices:
                 emp = employees[idx]
+
+                # Contractual minimum
                 try:
                     if 'Minimum Contractual Hours' in emp: om = int(emp['Minimum Contractual Hours'])
                     elif 'Minimum Contractual Hours ' in emp: om = int(emp['Minimum Contractual Hours '])
                     else: om = 0
                 except: om = 0
-                ox = int(emp.get('Max Weekly Hours', 40))
+
+                # Normal max from contract
+                normal_max = int(emp.get('Max Weekly Hours', 40))
+
+                # ── MAX HOURS OVERRIDE ──────────────────────────────────
+                # If a non-zero override is set, it acts as a hard ceiling
+                # for this employee, replacing their normal max. The min
+                # is also clamped down to the override so the constraint
+                # min <= hours <= max remains satisfiable.
+                try:
+                    override_val = int(float(emp.get('Max Hours Override', 0) or 0))
+                except (ValueError, TypeError):
+                    override_val = 0
+
+                if override_val > 0:
+                    effective_max = min(normal_max, override_val)
+                    # Clamp minimum down too if the override is tighter than the contract
+                    if om > effective_max:
+                        om = effective_max  # solver can't exceed the cap
+                else:
+                    effective_max = normal_max
+                # ────────────────────────────────────────────────────────
+
                 emp_original_mins[idx] = om
-                emp_original_maxs[idx] = ox
+                emp_effective_maxs[idx] = effective_max
                 total_contract_min += om
-            
+
             # Surplus: how many hours above total minimums does the budget allow?
             if total_contract_min > 0 and weekly_budget_hours < 9999:
                 total_surplus = max(0, weekly_budget_hours - total_contract_min)
@@ -457,20 +505,23 @@ def solve_rota_final_v14(sheet_id=None, target_weeks=None, username=None):
                 max_physical_capacity = available_days_count * MAX_SHIFT_LENGTH
                 
                 original_min = emp_original_mins[idx]
-                original_max = emp_original_maxs[idx]
+                effective_max = emp_effective_maxs[idx]
 
                 # PROPORTIONAL REDUCTION (for failed attempts)
                 if reduction_pct > 0 and original_min > 0:
                     adjusted_min = max(0, math.floor(original_min * (1.0 - reduction_pct)))
-                    adjusted_max = max(adjusted_min, math.floor(original_max * (1.0 - reduction_pct)))
+                    # Only reduce max if no override is active — we respect the override
+                    # as a hard intent signal and don't inflate it during relaxation
+                    override_active = int(float(emp.get('Max Hours Override', 0) or 0)) > 0
+                    if override_active:
+                        adjusted_max = effective_max
+                    else:
+                        adjusted_max = max(adjusted_min, math.floor(effective_max * (1.0 - reduction_pct)))
                 else:
                     adjusted_min = original_min
-                    adjusted_max = original_max
+                    adjusted_max = effective_max
                 
                 # FAIR-SHARE CAP: proportional share of surplus + 2h solver headroom
-                # The budget constraint prevents total overspend; this just stops
-                # one employee from hogging all surplus while others sit at their floor.
-                # The +2h ensures the solver always has room to manoeuvre.
                 if total_surplus < 9999 and adjusted_min > 0 and total_contract_min > 0:
                     proportional_share = total_surplus * adjusted_min / total_contract_min
                     fair_share_max = adjusted_min + max(2, math.ceil(proportional_share))
@@ -616,7 +667,7 @@ def solve_rota_final_v14(sheet_id=None, target_weeks=None, username=None):
                             model.Add(sum(work[(idx, date_str, h)] for idx in emp_indices) == 1)
                         model.Add(sum(work[(idx, date_str, second_start_latest)] for idx in emp_indices) >= 2)
 
-                # EVENT-AWARE STAFFING (replaces rush lock ratchet)
+                # EVENT-AWARE STAFFING
                 if day_event and event_start_hour:
                     prep_hour = max(start_h, event_start_hour - EVENT_PREP_HOURS)
                     event_end_coverage = min(event_start_hour + 3, end_h)
