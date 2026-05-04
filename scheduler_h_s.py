@@ -39,10 +39,8 @@ EVENT_THRESHOLDS = {
 EVENING_START_HOUR = 17 
 MORNING_END_HOUR = 12    
 
-WEIGHT_UTILIZATION = 10
 WEIGHT_PREFERRED_DAY = 100      
 WEIGHT_PREFERRED_SLOT = 50      
-WEIGHT_FAIRNESS = 2  # Quadratic load balancer — penalizes uneven hour distribution
 
 # --- GRADUATED SOLVER CONFIGS ---
 # relax_closer_rest: when True, closers are NOT forced to start >=12 after a close.
@@ -405,7 +403,6 @@ def solve_rota_final_v14(sheet_id=None, target_weeks=None, username=None):
 
             # --- Budget ceiling ---
             model.Add(sum(all_worked_hours_vars) <= weekly_budget_hours)
-            objective_terms.append(WEIGHT_UTILIZATION * sum(all_worked_hours_vars))
 
             # --- Fixed weekly shifts ---
             for idx in emp_indices:
@@ -538,11 +535,21 @@ def solve_rota_final_v14(sheet_id=None, target_weeks=None, username=None):
                 model.Add(emp_hours_var == sum(total_hours_vars))
                 model.Add(emp_hours_var >= adjusted_min)
                 model.Add(emp_hours_var <= adjusted_max)
-                
-                sq_hours = model.NewIntVar(0, 10000, f'sq_hrs_{idx}')
-                model.AddMultiplicationEquality(sq_hours, [emp_hours_var, emp_hours_var])
-                objective_terms.append(-WEIGHT_FAIRNESS * sq_hours)
-                
+
+                # TIERED REWARD: hours up to the contractual minimum are worth far
+                # more than surplus hours. This ensures every employee hits their
+                # minimum before any surplus is distributed — without a quadratic
+                # penalty fighting against utilisation.
+                if adjusted_min > 0:
+                    hours_at_min = model.NewIntVar(0, 100, f'hrs_at_min_{idx}')
+                    model.AddMinEquality(hours_at_min, [emp_hours_var, adjusted_min])
+                    hours_surplus = model.NewIntVar(0, 100, f'hrs_surplus_{idx}')
+                    model.Add(hours_surplus == emp_hours_var - hours_at_min)
+                    objective_terms.append(50 * hours_at_min)   # strongly reward hitting minimum
+                    objective_terms.append(5  * hours_surplus)  # weakly reward surplus above min
+                else:
+                    objective_terms.append(5 * emp_hours_var)
+
                 total_working_days = [is_working_day[(idx, d)] for d in dates_in_order]
                 model.Add(sum(total_working_days) <= MAX_CONSECUTIVE_DAYS)
 
