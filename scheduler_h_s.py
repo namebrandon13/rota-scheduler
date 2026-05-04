@@ -531,6 +531,9 @@ def solve_rota_final_v14(sheet_id=None, target_weeks=None, username=None):
 
                     model.Add(sum(work[(idx, date_str, h)] for h in hours_range) > 0).OnlyEnforceIf(is_working_day[(idx, date_str)])
                     model.Add(sum(work[(idx, date_str, h)] for h in hours_range) == 0).OnlyEnforceIf(is_working_day[(idx, date_str)].Not())
+                    # Pin start/end to 0 on OFF days so the rest rule formula never fires spuriously
+                    model.Add(daily_start_hour[(idx, date_str)] == 0).OnlyEnforceIf(is_working_day[(idx, date_str)].Not())
+                    model.Add(daily_end_hour[(idx, date_str)] == 0).OnlyEnforceIf(is_working_day[(idx, date_str)].Not())
                     for h in hours_range:
                         if h == start_h: model.Add(start[(idx, date_str, h)] == work[(idx, date_str, h)])
                         else:
@@ -583,13 +586,29 @@ def solve_rota_final_v14(sheet_id=None, target_weeks=None, username=None):
                             model.Add(work[(idx, date_str, h)] == 0)
 
             # --- Rest between consecutive days ---
+            # For Closing-role employees (end = midnight/24), the standard formula
+            # (tomorrow_start + 24) - today_end can create phantom violations because
+            # daily_start_hour defaults to 0 on OFF days. We handle them separately
+            # with an explicit noon-start constraint on the next worked day.
             for idx in emp_indices:
+                emp = employees[idx]
+                fixed_role = str(emp.get('Fixed Role', '')).strip()
+                is_closer = (fixed_role == 'Closing')
+
                 for i in range(len(dates_in_order) - 1):
                     today_d = dates_in_order[i]
                     tomorrow_d = dates_in_order[i+1]
-                    model.Add(
-                        (daily_start_hour[(idx, tomorrow_d)] + 24) - daily_end_hour[(idx, today_d)] >= MIN_REST_HOURS
-                    ).OnlyEnforceIf([is_working_day[(idx, today_d)], is_working_day[(idx, tomorrow_d)]])
+
+                    if is_closer:
+                        # Closers always finish at store-close (midnight=24).
+                        # Enforce that if they work tomorrow, they start no earlier than noon.
+                        model.Add(
+                            daily_start_hour[(idx, tomorrow_d)] >= MIN_REST_HOURS
+                        ).OnlyEnforceIf([is_working_day[(idx, today_d)], is_working_day[(idx, tomorrow_d)]])
+                    else:
+                        model.Add(
+                            (daily_start_hour[(idx, tomorrow_d)] + 24) - daily_end_hour[(idx, today_d)] >= MIN_REST_HOURS
+                        ).OnlyEnforceIf([is_working_day[(idx, today_d)], is_working_day[(idx, tomorrow_d)]])
 
             # --- Daily staffing + events ---
             for i, row in week_data.iterrows():
