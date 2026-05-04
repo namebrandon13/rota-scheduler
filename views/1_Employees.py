@@ -161,12 +161,12 @@ def render_sidebar():
                 st.markdown(f"📌 **Fixed Shifts:** {fixed}")
             
             # Show count of employees with an active override
-            if 'Max Hours Override' in df.columns:
-                overrides = df['Max Hours Override'].apply(
+            if 'Max Shift Length' in df.columns:
+                overrides = df['Max Shift Length'].apply(
                     lambda x: pd.notna(x) and str(x).strip() not in ['', 'nan', '0', '0.0']
                 ).sum()
                 if overrides > 0:
-                    st.markdown(f"⚠️ **Hours Overrides Active:** {overrides}")
+                    st.markdown(f"⏱️ **Shift Caps Active:** {overrides}")
 
 render_sidebar()
 
@@ -257,20 +257,18 @@ def show_list_view():
                 max_hrs = emp.get('Max Weekly Hours', 40)
 
                 # Check for active override
-                override_hrs = emp.get('Max Hours Override', '')
+                max_shift = emp.get('Max Shift Length', '')
                 try:
-                    override_val = int(float(override_hrs))
+                    max_shift_val = int(float(max_shift)) if str(max_shift).strip() not in ['', 'nan'] else 0
                 except (ValueError, TypeError):
-                    override_val = 0
+                    max_shift_val = 0
 
-                if override_val > 0:
+                st.markdown(f"<div class='emp-detail'>📊 Hours: {min_hrs} - {max_hrs} per week</div>", unsafe_allow_html=True)
+                if max_shift_val > 0:
                     st.markdown(
-                        f"<div class='emp-detail'>📊 Hours: {min_hrs}–{max_hrs}/wk &nbsp;"
-                        f"<span style='color:#9A3412;font-weight:700'>⚠️ Capped at {override_val}h this week</span></div>",
+                        f"<div class='emp-detail'>⏱️ Max shift: <strong>{max_shift_val}h</strong></div>",
                         unsafe_allow_html=True
                     )
-                else:
-                    st.markdown(f"<div class='emp-detail'>📊 Hours: {min_hrs} - {max_hrs} per week</div>", unsafe_allow_html=True)
                 
                 badges_html = ""
                 
@@ -333,11 +331,11 @@ def show_table_view():
         'Name': st.column_config.TextColumn('Name', width='medium'),
         'Max Weekly Hours': st.column_config.NumberColumn('Max Hours', min_value=0, max_value=60),
         'Minimum Contractual Hours': st.column_config.NumberColumn('Min Hours', min_value=0, max_value=60),
-        'Max Hours Override': st.column_config.NumberColumn(
-            'Max Override (this week)',
+        'Max Shift Length': st.column_config.NumberColumn(
+            'Max Shift Length (h)',
             min_value=0,
-            max_value=60,
-            help="Set a temporary cap on this employee's max hours. Leave 0 or blank to use their normal max."
+            max_value=9,
+            help="Maximum hours for any single shift. 0 = use store default (9h)."
         ),
         'Designation': st.column_config.SelectboxColumn(
             'Role',
@@ -452,36 +450,35 @@ def show_edit_view():
                 value=int(emp.get('Max Weekly Hours', 40)) if pd.notna(emp.get('Max Weekly Hours')) else 40
             )
         
-        # ── Max Hours Override ──────────────────────────────
+        # ── Max Shift Length ──────────────────────────────────────
         st.divider()
-        st.subheader("⚠️ Temporary Hours Override")
+        st.subheader("⏱️ Shift Length Limit")
 
-        override_col1, override_col2 = st.columns([2, 3])
+        shift_col1, shift_col2 = st.columns([2, 3])
 
-        with override_col1:
-            # Load existing override value safely
-            raw_override = emp.get('Max Hours Override', 0)
+        with shift_col1:
+            raw_max_shift = emp.get('Max Shift Length', 0)
             try:
-                current_override = int(float(raw_override)) if pd.notna(raw_override) and str(raw_override).strip() not in ['', 'nan'] else 0
+                current_max_shift = int(float(raw_max_shift)) if pd.notna(raw_max_shift) and str(raw_max_shift).strip() not in ['', 'nan'] else 0
             except (ValueError, TypeError):
-                current_override = 0
+                current_max_shift = 0
 
-            max_hours_override = st.number_input(
-                "Max Hours Override (this week only)",
+            max_shift_length = st.number_input(
+                "Max Shift Length (hours)",
                 min_value=0,
-                max_value=60,
-                value=current_override,
-                help="If set above 0, the solver will cap this employee's hours at this value instead of their normal maximum. Set back to 0 to remove the override."
+                max_value=9,
+                value=current_max_shift,
+                help="Caps the maximum length of any single shift. Set to 0 to use the store default (9h). Useful for part-time staff or those who cannot do full-length shifts."
             )
 
-        with override_col2:
+        with shift_col2:
             st.write("")
             st.write("")
-            if current_override > 0:
-                st.warning(f"⚠️ Override active — solver will cap at **{current_override}h** this week. Set to 0 to clear.")
+            if current_max_shift > 0:
+                st.warning(f"⏱️ Shifts capped at **{current_max_shift}h** maximum. Set to 0 to use store default.")
             else:
-                st.info("No override active. Employee will be scheduled up to their normal Max Weekly Hours.")
-        # ────────────────────────────────────────────────────
+                st.info("No limit set. Shifts will use the store default (up to 9h).")
+        # ────────────────────────────────────────────
 
         st.divider()
         st.subheader("📅 Availability")
@@ -686,7 +683,7 @@ def show_edit_view():
             'Name': name,
             'Max Weekly Hours': max_hours,
             'Minimum Contractual Hours': min_hours,
-            'Max Hours Override': max_hours_override if max_hours_override > 0 else '',
+            'Max Shift Length': max_shift_length if max_shift_length > 0 else '',
             'Designation': designation,
             'Preferred Day': ', '.join(selected_pref_days) if selected_pref_days else '',
             'Preferred slot': preferred_slot if preferred_slot != 'Any' else '',
