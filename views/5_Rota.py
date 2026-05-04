@@ -453,7 +453,21 @@ def show_week_view():
         return
     
     dc = [c for c in df.columns if c not in ('Name', 'Employee ID', 'Total Weekly Hours')]
-    
+
+    if not dc:
+        st.warning("⚠️ This rota appears to have no day columns. Try re-generating it.")
+        if st.button("🚀 Re-generate now", type="primary"):
+            with st.spinner("Regenerating…"):
+                try:
+                    from scheduler_h_s import solve_rota_final_v14
+                    solve_rota_final_v14(sheet_id=sheet_id, target_weeks=[ws], username=username)
+                    st.success("Done!")
+                    time.sleep(0.8)
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Error: {e}")
+        return
+
     st.markdown("**Click a day for the detailed breakdown:**")
     dbc = st.columns(len(dc))
     for i, ch in enumerate(dc):
