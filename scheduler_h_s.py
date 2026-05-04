@@ -466,10 +466,10 @@ def solve_rota_final_v14(sheet_id=None, target_weeks=None, username=None):
                     if end_h == 0: end_h = 24
                     for h in range(start_h, end_h): model.Add(work[(idx, date_str, h)] == 0)
 
-            # --- Per-employee hours: collect originals (with override) ---
+            # --- Per-employee hours: collect originals ---
             total_contract_min = 0
             emp_original_mins = {}
-            emp_effective_maxs = {}   # Takes override into account
+            emp_effective_maxs = {}
 
             for idx in emp_indices:
                 emp = employees[idx]
@@ -497,12 +497,6 @@ def solve_rota_final_v14(sheet_id=None, target_weeks=None, username=None):
                 emp_effective_maxs[idx] = effective_max
                 total_contract_min += om
 
-            # Surplus: how many hours above total minimums does the budget allow?
-            if total_contract_min > 0 and weekly_budget_hours < 9999:
-                total_surplus = max(0, weekly_budget_hours - total_contract_min)
-            else:
-                total_surplus = 9999
-            
             # --- Contractual hours + fairness ---
             for idx in emp_indices:
                 emp = employees[idx]
@@ -529,12 +523,6 @@ def solve_rota_final_v14(sheet_id=None, target_weeks=None, username=None):
                 else:
                     adjusted_min = original_min
                     adjusted_max = effective_max
-                
-                # FAIR-SHARE CAP: proportional share of surplus + 2h solver headroom
-                if total_surplus < 9999 and adjusted_min > 0 and total_contract_min > 0:
-                    proportional_share = total_surplus * adjusted_min / total_contract_min
-                    fair_share_max = adjusted_min + max(2, math.ceil(proportional_share))
-                    adjusted_max = min(adjusted_max, fair_share_max)
                 
                 adjusted_min = min(adjusted_min, max_physical_capacity)
                 adjusted_max = max(adjusted_max, adjusted_min)  # sanity
