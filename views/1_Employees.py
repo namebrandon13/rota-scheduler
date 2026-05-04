@@ -10,7 +10,6 @@ from gsheets_db import get_user_data, write_user_data
 # AUTH & SETUP
 # ======================================================
 
-# Verify user is logged in and has a sheet ID AND username assigned
 if 'sheet_id' not in st.session_state or 'username' not in st.session_state:
     st.error("Please log in to access the Employees Management.")
     st.stop()
@@ -71,6 +70,7 @@ html,body,[class*="css"]{font-family:'Inter',sans-serif;}
 .badge-red{background:#FEE2E2;color:#991B1B;}
 .badge-blue{background:#DBEAFE;color:#1E40AF;}
 .badge-gray{background:#F1F5F9;color:#475569;}
+.badge-orange{background:#FFEDD5;color:#9A3412;}
 
 div[data-testid="stMetric"]{
     background:white;
@@ -96,9 +96,7 @@ if 'edit_emp_id' not in st.session_state:
 
 @st.cache_data(ttl=10)
 def load_employees(user):
-    """Load employees from Google Sheets for the specific user."""
     try:
-        # Changed to get_user_data
         df = get_user_data(sheet_id, SHEET_NAME, user)
         if not df.empty:
             df.columns = df.columns.str.strip()
@@ -109,10 +107,7 @@ def load_employees(user):
 
 
 def save_employees(df, user):
-    """Save employees back to Google Sheets. 
-    (write_user_data handles isolated tab updates automatically)"""
     try:
-        # Changed to write_user_data
         write_user_data(sheet_id, SHEET_NAME, user, df)
         st.cache_data.clear()
         return True
@@ -157,7 +152,6 @@ def render_sidebar():
             
             st.markdown("---")
             
-            # Quick stats
             if 'Opening Trained' in df.columns:
                 openers = len(df[df['Opening Trained'] == 'Yes'])
                 st.markdown(f"🌅 **Opening Trained:** {openers}")
@@ -165,6 +159,14 @@ def render_sidebar():
             if 'Fixed Shift Enabled' in df.columns:
                 fixed = len(df[df['Fixed Shift Enabled'] == 'Yes'])
                 st.markdown(f"📌 **Fixed Shifts:** {fixed}")
+            
+            # Show count of employees with an active override
+            if 'Max Hours Override' in df.columns:
+                overrides = df['Max Hours Override'].apply(
+                    lambda x: pd.notna(x) and str(x).strip() not in ['', 'nan', '0', '0.0']
+                ).sum()
+                if overrides > 0:
+                    st.markdown(f"⚠️ **Hours Overrides Active:** {overrides}")
 
 render_sidebar()
 
@@ -180,10 +182,8 @@ def show_list_view():
     
     if df.empty:
         st.warning("No employee data found.")
-        # Provide an empty dataframe so the "Add Employee" button still works to build off of
         df = pd.DataFrame(columns=['ID', 'Name', 'Designation', 'Minimum Contractual Hours', 'Max Weekly Hours'])
     
-    # Action buttons
     col1, col2, col3 = st.columns([1, 1, 4])
     with col1:
         if st.button("➕ Add Employee", type="primary", use_container_width=True):
@@ -197,7 +197,6 @@ def show_list_view():
     if df.empty:
         return
 
-    # Search and filter
     fc1, fc2, fc3 = st.columns([2, 1, 1])
     
     with fc1:
@@ -210,7 +209,6 @@ def show_list_view():
     with fc3:
         sort_by = st.selectbox("Sort by", ['Seniority', 'Name', 'ID', 'Max Weekly Hours'], label_visibility="collapsed")
     
-    # Seniority order (highest to lowest)
     SENIORITY_ORDER = {
         'Manager': 1,
         'Shift Leader': 2,
@@ -218,7 +216,6 @@ def show_list_view():
         'Associate': 4
     }
     
-    # Filter data
     filtered = df.copy()
     
     if search:
@@ -227,7 +224,6 @@ def show_list_view():
     if role_filter != 'All':
         filtered = filtered[filtered['Designation'] == role_filter]
     
-    # Add seniority rank for sorting
     filtered['_seniority'] = filtered['Designation'].map(lambda x: SENIORITY_ORDER.get(x, 99))
     
     if sort_by == 'Seniority':
@@ -239,12 +235,10 @@ def show_list_view():
     elif sort_by == 'Max Weekly Hours':
         filtered = filtered.sort_values('Max Weekly Hours', ascending=False)
     
-    # Remove helper column
     filtered = filtered.drop(columns=['_seniority'])
     
     st.caption(f"Showing {len(filtered)} employee(s)")
     
-    # Employee cards
     for _, emp in filtered.iterrows():
         with st.container():
             c1, c2 = st.columns([5, 1])
@@ -253,19 +247,31 @@ def show_list_view():
                 role = str(emp.get('Designation', 'Associate'))
                 role_class = get_role_class(role)
                 
-                # Name and role
                 st.markdown(f"""
                 <div class='emp-card'>
                     <div class='emp-name'>{emp['Name']}</div>
                     <span class='emp-role {role_class}'>{role}</span>
                 """, unsafe_allow_html=True)
                 
-                # Hours info
                 min_hrs = emp.get('Minimum Contractual Hours', 0)
                 max_hrs = emp.get('Max Weekly Hours', 40)
-                st.markdown(f"<div class='emp-detail'>📊 Hours: {min_hrs} - {max_hrs} per week</div>", unsafe_allow_html=True)
+
+                # Check for active override
+                override_hrs = emp.get('Max Hours Override', '')
+                try:
+                    override_val = int(float(override_hrs))
+                except (ValueError, TypeError):
+                    override_val = 0
+
+                if override_val > 0:
+                    st.markdown(
+                        f"<div class='emp-detail'>📊 Hours: {min_hrs}–{max_hrs}/wk &nbsp;"
+                        f"<span style='color:#9A3412;font-weight:700'>⚠️ Capped at {override_val}h this week</span></div>",
+                        unsafe_allow_html=True
+                    )
+                else:
+                    st.markdown(f"<div class='emp-detail'>📊 Hours: {min_hrs} - {max_hrs} per week</div>", unsafe_allow_html=True)
                 
-                # Badges
                 badges_html = ""
                 
                 if emp.get('Opening Trained') == 'Yes':
@@ -322,12 +328,17 @@ def show_table_view():
         st.warning("No employee data found.")
         return
     
-    # Column config for better editing
     column_config = {
         'ID': st.column_config.NumberColumn('ID', disabled=True),
         'Name': st.column_config.TextColumn('Name', width='medium'),
         'Max Weekly Hours': st.column_config.NumberColumn('Max Hours', min_value=0, max_value=60),
         'Minimum Contractual Hours': st.column_config.NumberColumn('Min Hours', min_value=0, max_value=60),
+        'Max Hours Override': st.column_config.NumberColumn(
+            'Max Override (this week)',
+            min_value=0,
+            max_value=60,
+            help="Set a temporary cap on this employee's max hours. Leave 0 or blank to use their normal max."
+        ),
         'Designation': st.column_config.SelectboxColumn(
             'Role',
             options=['Manager', 'Shift Leader', 'Team Leader', 'Associate'],
@@ -412,7 +423,6 @@ def show_edit_view():
     
     st.divider()
     
-    # Form
     with st.form("emp_form"):
         st.subheader("📋 Basic Information")
         
@@ -442,10 +452,40 @@ def show_edit_view():
                 value=int(emp.get('Max Weekly Hours', 40)) if pd.notna(emp.get('Max Weekly Hours')) else 40
             )
         
+        # ── Max Hours Override ──────────────────────────────
+        st.divider()
+        st.subheader("⚠️ Temporary Hours Override")
+
+        override_col1, override_col2 = st.columns([2, 3])
+
+        with override_col1:
+            # Load existing override value safely
+            raw_override = emp.get('Max Hours Override', 0)
+            try:
+                current_override = int(float(raw_override)) if pd.notna(raw_override) and str(raw_override).strip() not in ['', 'nan'] else 0
+            except (ValueError, TypeError):
+                current_override = 0
+
+            max_hours_override = st.number_input(
+                "Max Hours Override (this week only)",
+                min_value=0,
+                max_value=60,
+                value=current_override,
+                help="If set above 0, the solver will cap this employee's hours at this value instead of their normal maximum. Set back to 0 to remove the override."
+            )
+
+        with override_col2:
+            st.write("")
+            st.write("")
+            if current_override > 0:
+                st.warning(f"⚠️ Override active — solver will cap at **{current_override}h** this week. Set to 0 to clear.")
+            else:
+                st.info("No override active. Employee will be scheduled up to their normal Max Weekly Hours.")
+        # ────────────────────────────────────────────────────
+
         st.divider()
         st.subheader("📅 Availability")
         
-        # Preferred Days
         st.markdown("**Preferred Days** (days they prefer to work)")
         days = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday']
         
@@ -459,7 +499,6 @@ def show_edit_view():
                 if st.checkbox(day[:3], value=(day in pref_days_list), key=f"pref_{day}"):
                     selected_pref_days.append(day)
         
-        # Unavailable Days
         st.markdown("**Unavailable Days** (days they CANNOT work)")
         
         current_unavail = str(emp.get('Unavailable Days', ''))
@@ -534,7 +573,6 @@ def show_edit_view():
                 index=fixed_role_options.index(current_fixed_role) if current_fixed_role in fixed_role_options else 0
             )
         
-        # Fixed Weekly Shift
         if fixed_shift_enabled:
             st.markdown("**Fixed Weekly Shift Pattern**")
             st.caption("Format: Monday|09:00|17:00;Wednesday|12:00|20:00")
@@ -549,7 +587,6 @@ def show_edit_view():
         
         st.divider()
         
-        # Submit buttons
         col1, col2, col3 = st.columns([2, 1, 1])
         
         with col1:
@@ -568,7 +605,6 @@ def show_edit_view():
     st.markdown("**🕐 Daily Availability Windows** *(optional)*")
     st.caption("Restrict which hours an employee can work on specific days. Useful for part-time students or dual-job staff.")
     
-    # Parse existing daily availability data from loaded employee
     current_daily_avail_raw = str(emp.get('Daily Available Hours', ''))
     has_daily_avail = current_daily_avail_raw not in ['', 'nan', 'None']
     
@@ -586,7 +622,6 @@ def show_edit_view():
                 except:
                     pass
     
-    # Read unavailable days from loaded employee data (form hasn't submitted yet)
     loaded_unavail = str(emp.get('Unavailable Days', ''))
     unavail_for_da = [d.strip() for d in loaded_unavail.split(',') if d.strip() and d.strip() != 'nan']
     
@@ -603,7 +638,7 @@ def show_edit_view():
     if daily_avail_enabled:
         for day in days_list:
             if day in unavail_for_da:
-                continue  # skip days they can't work at all
+                continue
             
             existing_day = existing_avail.get(day, None)
             
@@ -635,7 +670,6 @@ def show_edit_view():
                     end_hour = da_end.hour if da_end.hour != 0 else 24
                 daily_avail_entries[day] = (da_start.hour, end_hour)
     
-    # Build the storage string
     daily_avail_str = ";".join(
         f"{d}|{s:02d}:00|{e:02d}:00" if e < 24 else f"{d}|{s:02d}:00|00:00"
         for d, (s, e) in daily_avail_entries.items()
@@ -652,6 +686,7 @@ def show_edit_view():
             'Name': name,
             'Max Weekly Hours': max_hours,
             'Minimum Contractual Hours': min_hours,
+            'Max Hours Override': max_hours_override if max_hours_override > 0 else '',
             'Designation': designation,
             'Preferred Day': ', '.join(selected_pref_days) if selected_pref_days else '',
             'Preferred slot': preferred_slot if preferred_slot != 'Any' else '',
