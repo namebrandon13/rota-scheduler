@@ -45,12 +45,14 @@ WEIGHT_PREFERRED_SLOT = 50
 WEIGHT_FAIRNESS = 2  # Quadratic load balancer — penalizes uneven hour distribution
 
 # --- GRADUATED SOLVER CONFIGS ---
+# relax_closer_rest: when True, closers are NOT forced to start >=12 after a close.
+# This is needed when closer contracts are too high to satisfy with the rest rule active.
 SOLVER_CONFIGS = [
-    {'label': 'Standard',                      'min_shift': 6, 'reduction_pct': 0.00, 'trim_fixed': False},
-    {'label': '5% uniform contract reduction',  'min_shift': 6, 'reduction_pct': 0.05, 'trim_fixed': False},
-    {'label': '10% uniform contract reduction', 'min_shift': 6, 'reduction_pct': 0.10, 'trim_fixed': False},
-    {'label': '5h shifts + 10% reduction',      'min_shift': 5, 'reduction_pct': 0.10, 'trim_fixed': False},
-    {'label': 'Full relaxation',                'min_shift': 5, 'reduction_pct': 0.15, 'trim_fixed': True},
+    {'label': 'Standard',                                'min_shift': 6, 'reduction_pct': 0.00, 'trim_fixed': False, 'relax_closer_rest': False},
+    {'label': '5% uniform contract reduction',           'min_shift': 6, 'reduction_pct': 0.05, 'trim_fixed': False, 'relax_closer_rest': False},
+    {'label': '10% uniform contract reduction',          'min_shift': 6, 'reduction_pct': 0.10, 'trim_fixed': False, 'relax_closer_rest': False},
+    {'label': '5h shifts + 10% + relaxed closer rest',  'min_shift': 5, 'reduction_pct': 0.10, 'trim_fixed': False, 'relax_closer_rest': True},
+    {'label': 'Full relaxation + relaxed closer rest',   'min_shift': 5, 'reduction_pct': 0.15, 'trim_fixed': True,  'relax_closer_rest': True},
 ]
 
 # ==============================================================================
@@ -227,27 +229,65 @@ def _run_diagnostics(employees, emp_indices, week_data, dates_in_order,
                 f"This leaves very little flexibility. Consider reducing fixed shift hours."
             )
     
-    # 6. Rest rule pressure on closers
-    closing_names = []
+    # 6. Closer feasibility: can they actually hit their contract minimum?
+    for _, row in week_data.iterrows():
+        store_end_h = pd.to_datetime(str(row['End'])).hour
+        if store_end_h == 0: store_end_h = 24
+        break  # just need the store close time
+
     for idx in emp_indices:
         emp = employees[idx]
-        if str(emp.get('Fixed Role', '')).strip() == 'Closing':
-            closing_names.append(str(emp['Name']))
-    
-    if closing_names:
+        emp_name = str(emp['Name']).strip()
+        emp_id = str(emp['ID']).strip()
+        if str(emp.get('Fixed Role', '')).strip() != 'Closing': continue
+
+        min_hrs = safe_int(emp.get('Minimum Contractual Hours', 0), 0)
+        if min_hrs == 0: continue
+
+        unavail = str(emp.get('Unavailable Days', ''))
+        available_days = 0
+        for d in dates_in_order:
+            day_name = pd.to_datetime(d).day_name()
+            if unavail != 'nan' and day_name in unavail: continue
+            if (emp_id, d) in approved_holidays or (emp_name, d) in approved_holidays: continue
+            available_days += 1
+
+        # Closers can only work noon (12:00) → store close on days AFTER a worked day,
+        # but on their FIRST day of a run they have no rest constraint.
+        # Conservative estimate: assume worst case — every day restricted to noon start.
+        closer_max_shift = min(MAX_SHIFT_LENGTH, store_end_h - MIN_REST_HOURS)  # e.g. 24-12=12, capped at 9
+        max_possible_closer = available_days * closer_max_shift
+
+        if max_possible_closer < min_hrs:
+            issues.append(
+                f"🌙 **{emp_name} (Closer) contract impossible:** Needs {min_hrs}h but with "
+                f"noon-start rest rule can work max {closer_max_shift}h/day × {available_days} days "
+                f"= {max_possible_closer}h. Reduce their minimum contractual hours to ≤{max_possible_closer}h."
+            )
+        elif available_days * closer_max_shift - min_hrs < 4:
+            issues.append(
+                f"🌙 **{emp_name} (Closer) very tight:** Needs {min_hrs}h, max possible with rest rule "
+                f"is {max_possible_closer}h — almost no solver headroom. Consider reducing minimum by a few hours."
+            )
+
+    # 7. Fair-share cap conflict: check if budget is too low relative to contracts
+    # even after the 15% reduction in the final config
+    total_min = sum(safe_int(employees[idx].get('Minimum Contractual Hours', 0), 0) for idx in emp_indices)
+    reduced_min = math.floor(total_min * 0.85)
+    if weekly_budget < reduced_min and weekly_budget < 9999:
         issues.append(
-            f"🌙 **Rest rule pressure:** {', '.join(closing_names)} have a Closing fixed role. "
-            f"They finish at midnight and cannot start until noon next day (12h rest rule), "
-            f"limiting them to ~12h over any 2 consecutive days."
+            f"💸 **Budget vs reduced contracts:** Even after the maximum 15% contract reduction, "
+            f"total minimum hours = {reduced_min}h but budget is only {weekly_budget}h. "
+            f"Increase the budget to at least {reduced_min}h."
         )
-    
 
     # Fallback
     if not issues:
         issues.append(
             "🔍 **No single obvious cause found.** The infeasibility is likely caused by "
-            "a combination of tight constraints (budget + contracts + rest rules + availability) "
-            "that together leave no valid solution. Try increasing the budget by 10-15%."
+            "a combination of tight constraints (budget + contracts + rest rules + availability). "
+            "Try: (1) increasing the budget by 10-15%, (2) reducing closer minimum contractual hours, "
+            "or (3) giving closers one or two unavailable days to reduce their required shift count."
         )
     
     return issues
@@ -340,6 +380,7 @@ def solve_rota_final_v14(sheet_id=None, target_weeks=None, username=None):
             min_shift_len = config['min_shift']
             reduction_pct = config['reduction_pct']
             trim_fixed = config['trim_fixed']
+            relax_closer_rest = config.get('relax_closer_rest', False)
             
             model = cp_model.CpModel()
             work, start, is_working_day = {}, {}, {}
@@ -599,16 +640,19 @@ def solve_rota_final_v14(sheet_id=None, target_weeks=None, username=None):
                     today_d = dates_in_order[i]
                     tomorrow_d = dates_in_order[i+1]
 
-                    if is_closer:
+                    if is_closer and not relax_closer_rest:
                         # Closers always finish at store-close (midnight=24).
                         # Enforce that if they work tomorrow, they start no earlier than noon.
                         model.Add(
                             daily_start_hour[(idx, tomorrow_d)] >= MIN_REST_HOURS
                         ).OnlyEnforceIf([is_working_day[(idx, today_d)], is_working_day[(idx, tomorrow_d)]])
-                    else:
+                    elif not is_closer:
                         model.Add(
                             (daily_start_hour[(idx, tomorrow_d)] + 24) - daily_end_hour[(idx, today_d)] >= MIN_REST_HOURS
                         ).OnlyEnforceIf([is_working_day[(idx, today_d)], is_working_day[(idx, tomorrow_d)]])
+                    # When relax_closer_rest=True: no consecutive-day rest constraint for closers.
+                    # The Closing role constraint still forces them to end at midnight,
+                    # but the solver can schedule them any start time the next day if needed.
 
             # --- Daily staffing + events ---
             for i, row in week_data.iterrows():
@@ -776,7 +820,7 @@ def solve_rota_final_v14(sheet_id=None, target_weeks=None, username=None):
             df_week = df_week[cols]
             
             # Add warning row if relaxation was used
-            if used_config['reduction_pct'] > 0 or used_config['min_shift'] < DEFAULT_MIN_SHIFT or used_config['trim_fixed']:
+            if used_config['reduction_pct'] > 0 or used_config['min_shift'] < DEFAULT_MIN_SHIFT or used_config['trim_fixed'] or used_config.get('relax_closer_rest'):
                 notes = []
                 if used_config['reduction_pct'] > 0:
                     notes.append(f"Contracts reduced uniformly by {used_config['reduction_pct']*100:.0f}%")
@@ -784,6 +828,8 @@ def solve_rota_final_v14(sheet_id=None, target_weeks=None, username=None):
                     notes.append(f"Min shift reduced to {used_config['min_shift']}h")
                 if used_config['trim_fixed']:
                     notes.append("Fixed shifts trimmed by 1h")
+                if used_config.get('relax_closer_rest'):
+                    notes.append("Closer consecutive-day rest rule relaxed")
                 warning_row = {col: '' for col in df_week.columns}
                 warning_row['Name'] = f"⚠️ ADJUSTED: {' | '.join(notes)}"
                 warning_row['Total Weekly Hours'] = ''
