@@ -28,9 +28,11 @@ BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 # ======================================================
 
 try:
-    from eventapicall import scan_live
-except:
+    from eventapicall import scan_live, calculate_smart_impact, _classify_event
+    _scorer_available = True
+except Exception:
     scan_live = None
+    _scorer_available = False
 
 # ======================================================
 # HELPERS
@@ -140,21 +142,19 @@ st.markdown("<div class='page-sub'>Track local events that may affect staffing d
 # ACTIONS
 # ======================================================
 
-c1, c2, c3 = st.columns([1.5, 1.5, 4])
+c1, c2, c3 = st.columns([1.5, 1.5, 1.5])
 
 with c1:
     if st.button("🔄 Run Live Scan", type="primary", use_container_width=True):
         if scan_live:
             with st.spinner("Scanning today + 30 days & syncing to cloud..."):
                 try:
-                    result = scan_live(sheet_id, username, 30)  # Scan today + 30 days
+                    result = scan_live(sheet_id, username, 30)
                     if result is not None and not result.empty:
-                        # Upload directly to Google Sheets, tied to this username
                         df_upload = result.copy()
                         if "Date" in df_upload.columns:
                             df_upload["Date"] = pd.to_datetime(df_upload["Date"]).dt.strftime('%Y-%m-%d')
                         write_user_data(sheet_id, SHEET_EVENTS, username, df_upload)
-                        
                         st.success(f"Found {len(result)} events and synced to cloud!")
                     else:
                         st.info("No new events found.")
@@ -165,7 +165,53 @@ with c1:
             st.error("Event scanner not available.")
 
 with c2:
+    if st.button("⚡ Recalculate Scores", use_container_width=True,
+                 help="Re-score all stored events using the latest impact formula — no API calls needed"):
+        if not _scorer_available:
+            st.error("Scorer not available — check eventapicall.py is deployed.")
+        elif df.empty:
+            st.warning("No events to recalculate.")
+        else:
+            with st.spinner("Recalculating impact scores…"):
+                try:
+                    df_recalc = df.copy()
+
+                    # Add Distance (Miles) if missing — needed by the scorer
+                    if "Distance (Miles)" not in df_recalc.columns:
+                        df_recalc["Distance (Miles)"] = 1.0
+
+                    # Re-classify and re-score every row
+                    df_recalc["Event Category"] = df_recalc.apply(
+                        lambda r: _classify_event(
+                            str(r.get("Event Name", "")),
+                            str(r.get("Source", ""))
+                        ), axis=1
+                    )
+                    df_recalc["Impact Score"] = df_recalc.apply(
+                        lambda r: calculate_smart_impact(r, history_df=None),
+                        axis=1
+                    )
+
+                    # Save back — format dates as strings for Sheets
+                    df_upload = df_recalc.copy()
+                    if "Date" in df_upload.columns:
+                        df_upload["Date"] = pd.to_datetime(
+                            df_upload["Date"]
+                        ).dt.strftime("%Y-%m-%d")
+
+                    write_user_data(sheet_id, SHEET_EVENTS, username, df_upload)
+
+                    changed = (df_recalc["Impact Score"] != df["Impact Score"]).sum() \
+                        if "Impact Score" in df.columns else len(df_recalc)
+                    st.success(f"✅ Recalculated {len(df_recalc)} events — {changed} score(s) updated.")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Recalculate error: {e}")
+
+with c3:
     st.caption("Scans: Today → +30 days")
+    if _scorer_available:
+        st.caption("⚡ Updates scores without re-scanning")
 
 # ======================================================
 # NO DATA
