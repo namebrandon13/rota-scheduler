@@ -330,24 +330,275 @@ def haversine_distance(lat1, lon1, lat2, lon2):
     return R * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
 
 
+# ==============================================================================
+#   SMART IMPACT SCORING ENGINE  (bar/pub optimised)
+#
+#   Formula:
+#       raw = footfall_c × distance_c × novelty_c × timing_c × affinity_c
+#       Impact Score (1–10) = clamp(round(1 + raw × 9 × CALIBRATION), 1, 10)
+#
+#   Every component is normalised to 0–1 so multiplying them together means
+#   one bad dimension (e.g. event is 1.8 miles away) can't be rescued by a
+#   great dimension.  The result is then stretched to the 1–10 scale.
+# ==============================================================================
+
+# ── Calibration constant ─────────────────────────────────────────────────────
+# 1.25 means a "nearly perfect" event still scores 10 even if one component
+# is slightly below its peak.
+_CALIBRATION = 1.65
+
+# ── Keyword → category mapping ───────────────────────────────────────────────
+# Order matters: first match wins.  Put more-specific terms above generic ones.
+_CATEGORY_RULES = [
+    # Sports — high affinity for a pub
+    ('football',   ['[arsenal]', '[tottenham]', '[chelsea]', '[west ham]', '[crystal palace]',
+                    '[brentford]', '[fulham]', '[qpr]', '[leyton orient]', '[england football]',
+                    'premier league', 'champions league', 'europa league', 'fa cup',
+                    'league cup', 'carabao', 'match day', 'football', 'soccer']),
+    ('rugby',      ['rugby', 'six nations', 'premiership rugby', 'harlequins',
+                    'saracens', 'wasps', 'world cup rugby']),
+    ('cricket',    ['cricket', 'test match', ' odi ', ' t20 ', "lord's", 'the oval']),
+    ('combat',     ['boxing', 'ufc', 'mma', 'fight night', 'wrestling', 'wbc', 'ibf']),
+    ('marathon',   ['marathon', 'half marathon', '10k', '5k run', 'road race',
+                    'fun run', 'triathlon', 'hackney half', 'vitality', 'parkrun',
+                    '[annual] tcs', '[annual] hackney', '[annual] royal parks',
+                    '[annual] vitality', '[annual] london 10']),
+    # Music & festivals
+    ('festival',   ['festival', 'wireless', 'all points east', 'field day',
+                    'lovebox', 'sw4', '[annual] wireless', '[annual] all points',
+                    '[annual] field day', '[annual] lovebox']),
+    ('concert',    ['concert', ' live ', 'tour', 'headline', 'presents', 'gig',
+                    '[sk]', '[dice]', '[eb]']),
+    # Public events
+    ('carnival',   ['carnival', 'notting hill', 'parade', 'pride', 'procession',
+                    '[annual] notting', '[annual] pride', '[annual] st patrick',
+                    '[annual] new year', '[annual] chinese new year',
+                    '[annual] diwali']),
+    # Pub-friendly misc
+    ('bank_holiday', ['[bh] ', 'bank holiday']),
+    # Lower-affinity
+    ('comedy',     ['comedy', 'comedian', 'stand-up', 'standup']),
+    ('theater',    ['theatre', 'theater', 'musical', 'opera', 'ballet',
+                    'west end', ' play ', 'production', 'shakespeare',
+                    'players', 'drama', 'panto', 'pantomime', 'stage',
+                    'the show', 'opening night', 'run week']),
+    ('conference', ['conference', 'expo ', 'summit ', 'symposium', 'convention',
+                    'awards ceremony', 'trade show']),
+    ('market',     ['market', ' fair ', 'farmers', 'street food', 'craft fair']),
+]
+
+# ── Per-category weights ─────────────────────────────────────────────────────
+
+# Affinity: how much does this event type drive pub trade?
+_AFFINITY = {
+    'football':    1.00,   # Pubs are built for match day
+    'rugby':       0.95,   # Classic pub sport
+    'cricket':     0.85,   # Long sessions = long drinking sessions
+    'combat':      0.85,   # Boxing night in a pub is a tradition
+    'concert':     0.85,   # Pre/post gig drinks are guaranteed
+    'festival':    0.85,   # Festival crowd = thirsty crowd
+    'carnival':    0.80,   # Outdoor + drinking culture
+    'bank_holiday':0.90,   # People are out all day
+    'marathon':    0.65,   # Spectators pop in; runners don't pre-drink
+    'comedy':      0.70,   # Some pre/post but niche
+    'theater':     0.50,   # Wrong demographic for a pub
+    'conference':  0.40,   # Business crowd, daytime
+    'market':      0.50,   # Casual browse, not a drinking occasion
+    'unknown':     0.65,   # Cautious default
+}
+
+# Novelty baseline: how "one-off" / exciting is this category by default?
+# Regular league football is lower than a cup final; weekly theatre is much lower
+# than a touring band's single concert date.
+_NOVELTY_BASE = {
+    'football':    0.55,   # Happens every week — cup games handled by history check
+    'rugby':       0.65,
+    'cricket':     0.65,
+    'combat':      0.85,   # Fight nights are rare
+    'concert':     0.90,   # Tours are genuinely one-off
+    'festival':    0.80,   # Annual but massive and special
+    'carnival':    0.85,   # Once a year
+    'bank_holiday':0.80,
+    'marathon':    0.80,
+    'comedy':      0.75,
+    'theater':     0.30,   # Runs for weeks/months → low novelty
+    'conference':  0.55,
+    'market':      0.25,   # Weekly → very low novelty
+    'unknown':     0.65,
+}
+
+
+def _classify_event(event_name: str, source: str) -> str:
+    """Return the best-matching category string for an event."""
+    name_lower = event_name.lower()
+    src_lower  = source.lower()
+    # ICS feeds are always football
+    if src_lower == 'ics feed':
+        return 'football'
+    for category, keywords in _CATEGORY_RULES:
+        if any(kw in name_lower for kw in keywords):
+            return category
+    return 'unknown'
+
+
+def _footfall_component(footfall: float) -> float:
+    """
+    Log-scale footfall → 0.10–1.00.
+    A 500-person sold-out special event (0.40) is deliberately distinguishable
+    from a 50,000-person festival (0.95) — crowd size still matters, just not
+    in a way that crushes small but genuinely exciting events.
+    """
+    if footfall >= 500000: return 1.00
+    if footfall >= 100000: return 0.97
+    if footfall >=  50000: return 0.93
+    if footfall >=  20000: return 0.87
+    if footfall >=  10000: return 0.78
+    if footfall >=   5000: return 0.68
+    if footfall >=   2000: return 0.55
+    if footfall >=   1000: return 0.45
+    if footfall >=    500: return 0.35
+    if footfall >=    200: return 0.25
+    return 0.15
+
+
+def _distance_component(dist_miles: float) -> float:
+    """Steep decay — an event 1.8 miles away is much less relevant than 0.3 miles."""
+    if dist_miles < 0.25:  return 1.00
+    if dist_miles < 0.50:  return 0.95
+    if dist_miles < 0.75:  return 0.88
+    if dist_miles < 1.00:  return 0.78
+    if dist_miles < 1.25:  return 0.65
+    if dist_miles < 1.50:  return 0.50
+    if dist_miles < 1.75:  return 0.35
+    if dist_miles < 2.00:  return 0.22
+    return 0.10
+
+
+def _history_modifier(event_name: str, history_df: pd.DataFrame) -> float:
+    """
+    Check how many times we have seen a similar event name in our saved
+    events file.  More appearances → more recurring → lower novelty modifier.
+
+    Uses Jaccard token overlap (no extra dependencies).
+    Threshold: similarity > 0.45 → counts as "same event".
+    """
+    if history_df is None or history_df.empty:
+        return 1.0   # No history → assume brand new
+    if 'Event Name' not in history_df.columns:
+        return 1.0
+
+    tokens_new = set(re.sub(r'[\[\]()]', '', event_name).lower().split())
+    # Remove common noise tokens
+    noise = {'the', 'a', 'an', 'at', 'in', 'of', 'and', 'vs', 'fc',
+             'live', 'london', '[sk]', '[dice]', '[eb]', '[annual]', '[bh]'}
+    tokens_new -= noise
+    if not tokens_new:
+        return 1.0
+
+    count = 0
+    for hist_name in history_df['Event Name'].dropna().astype(str):
+        tokens_hist = set(re.sub(r'[\[\]()]', '', hist_name).lower().split()) - noise
+        if not tokens_hist:
+            continue
+        intersection = tokens_new & tokens_hist
+        union        = tokens_new | tokens_hist
+        similarity   = len(intersection) / len(union) if union else 0
+        if similarity > 0.45:
+            count += 1
+
+    if count == 0:   return 1.00   # Never seen before — maximum novelty
+    if count == 1:   return 0.90
+    if count == 2:   return 0.80
+    if count <= 4:   return 0.65
+    if count <= 8:   return 0.50
+    return 0.38                    # Seen 9+ times — clearly a regular
+
+
+def _novelty_component(category: str, event_name: str,
+                       history_df: pd.DataFrame) -> float:
+    """
+    Final novelty score = category baseline × history modifier.
+    A weekly theatre show (base 0.30) that has appeared 6 times
+    in our DB (modifier 0.50) → 0.15 (very low, correct).
+    A one-off concert (base 0.90) never seen before (modifier 1.0) → 0.90.
+    """
+    base     = _NOVELTY_BASE.get(category, 0.65)
+    modifier = _history_modifier(event_name, history_df)
+    return base * modifier
+
+
+def _timing_component(date_str: str, start_time: str) -> float:
+    """
+    Bar/pub timing score.
+    Evening × weekend is the sweet spot.
+    Weekday mornings barely matter.
+    Bank Holiday Mondays are treated like Saturdays.
+    """
+    try:
+        dt = datetime.strptime(date_str, '%Y-%m-%d')
+        weekday = dt.weekday()   # 0=Mon … 6=Sun
+    except Exception:
+        weekday = 2   # default Wednesday
+
+    try:
+        hour = int(start_time.split(':')[0])
+    except Exception:
+        hour = 19   # default evening
+
+    # Day factor
+    if weekday == 5:   day_f = 1.20   # Saturday
+    elif weekday == 4: day_f = 1.15   # Friday
+    elif weekday == 6: day_f = 1.05   # Sunday
+    elif weekday == 3: day_f = 0.90   # Thursday
+    else:              day_f = 0.75   # Mon–Wed
+
+    # Time-of-day factor (pub perspective)
+    if hour >= 17:     time_f = 1.20   # Evening  → best for pub
+    elif hour >= 12:   time_f = 0.90   # Afternoon → decent
+    elif hour >= 9:    time_f = 0.55   # Morning  → low
+    else:              time_f = 0.40   # Very early
+
+    # Bank holidays act like Saturday evening regardless of actual weekday
+    # (detected via the event name prefix set by gov.uk source)
+    if 'bank holiday' in date_str.lower() or weekday == 0 and hour < 12:
+        pass   # keep calculated values; BH Monday is already captured in day_f
+
+    return min(day_f * time_f, 1.20)   # cap so we don't over-inflate
+
+
+def calculate_smart_impact(row, history_df: pd.DataFrame = None) -> int:
+    """
+    Main scoring entry point.  Replaces calculate_weighted_impact.
+
+    Returns an integer 1–10.
+
+    Score breakdown printed to console only when SCORE_DEBUG = True.
+    """
+    event_name = str(row.get('Event Name', ''))
+    source     = str(row.get('Source', ''))
+    footfall   = float(row.get('Est. Footfall', 500) or 500)
+    dist       = float(row.get('Distance (Miles)', 1.0) or 1.0)
+    date_str   = str(row.get('Date', ''))
+    start_time = str(row.get('Start Time', '19:00') or '19:00')
+
+    category   = _classify_event(event_name, source)
+
+    f_c  = _footfall_component(footfall)
+    d_c  = _distance_component(dist)
+    n_c  = _novelty_component(category, event_name, history_df)
+    t_c  = _timing_component(date_str, start_time)
+    a_c  = _AFFINITY.get(category, 0.65)
+
+    raw     = f_c * d_c * n_c * t_c * a_c
+    scaled  = 1 + raw * 9 * _CALIBRATION
+    score   = max(1, min(10, round(scaled)))
+    return score
+
+
+# Keep the old name as an alias so nothing else in the codebase breaks
 def calculate_weighted_impact(row):
-    footfall = row.get('Est. Footfall', 500)
-    dist     = row.get('Distance (Miles)', 1.0)
-    if footfall > 500000:  base = 10
-    elif footfall > 100000: base = 10
-    elif footfall > 50000:  base = 9
-    elif footfall > 20000:  base = 8
-    elif footfall > 10000:  base = 7
-    elif footfall > 5000:   base = 6
-    elif footfall > 2000:   base = 4
-    elif footfall > 500:    base = 3
-    else:                    base = 2
-    if dist < 0.5:    decay = 1.0
-    elif dist < 1.0:  decay = 0.9
-    elif dist < 1.5:  decay = 0.7
-    elif dist < 2.0:  decay = 0.5
-    else:             decay = 0.25
-    return max(1, int(base * decay))
+    """Legacy alias — calls calculate_smart_impact without history."""
+    return calculate_smart_impact(row, history_df=None)
 
 
 def _safe_get(url, headers=None, params=None, timeout=10):
@@ -1079,7 +1330,17 @@ def run_event_scan(sheet_id, username, start_date=None, end_date=None, merge=Tru
     ]
 
     # ── Impact scoring ────────────────────────────────────────────────────────
-    df['Impact Score'] = df.apply(calculate_weighted_impact, axis=1)
+    # Load our existing event history BEFORE scoring so the novelty engine
+    # can check how many times each event has appeared before in our database.
+    print("  Scoring with smart impact engine …")
+    history_df = load_existing_events()
+    df['Event Category'] = df.apply(
+        lambda r: _classify_event(str(r.get('Event Name', '')), str(r.get('Source', ''))),
+        axis=1,
+    )
+    df['Impact Score'] = df.apply(
+        lambda r: calculate_smart_impact(r, history_df=history_df), axis=1
+    )
 
     # ── De-duplicate & sort ───────────────────────────────────────────────────
     before = len(df)
