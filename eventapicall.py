@@ -383,8 +383,9 @@ _CATEGORY_RULES = [
                     'players', 'drama', 'panto', 'pantomime', 'stage',
                     'the show', 'opening night', 'run week']),
     ('conference', ['conference', 'expo ', 'summit ', 'symposium', 'convention',
-                    'awards ceremony', 'trade show']),
-    ('market',     ['market', ' fair ', 'farmers', 'street food', 'craft fair']),
+                    'awards ceremony', 'trade show', 'marketing summit', 'tech summit',
+                    'business forum', 'hackathon', 'tech conference']),
+    ('market',     [' market', 'farmers market', 'street food', 'craft fair', 'car boot', 'flea market']),
 ]
 
 # ── Per-category weights ─────────────────────────────────────────────────────
@@ -432,9 +433,25 @@ def _classify_event(event_name: str, source: str) -> str:
     """Return the best-matching category string for an event."""
     name_lower = event_name.lower()
     src_lower  = source.lower()
-    # ICS feeds are always football
+
+    # ── Source-level overrides (highest confidence) ───────────────────────
+    # ICS feeds are always football fixtures
     if src_lower == 'ics feed':
         return 'football'
+    # Music-tagged Ticketmaster events are concerts by definition.
+    # Songkick and Dice only list music events.
+    if 'ticketmaster (music)' in src_lower:
+        # Could still be a festival — check name first
+        if any(kw in name_lower for kw in ['festival', 'fest ', 'wireless',
+                                            'all points east', 'field day', 'lovebox']):
+            return 'festival'
+        return 'concert'
+    if src_lower in ('songkick', 'dice.fm'):
+        return 'concert'
+    if '[sk]' in name_lower or '[dice]' in name_lower:
+        return 'concert'
+
+    # ── Keyword matching for all other sources ────────────────────────────
     for category, keywords in _CATEGORY_RULES:
         if any(kw in name_lower for kw in keywords):
             return category
@@ -790,11 +807,28 @@ def get_ticketmaster_events(start_date, end_date, biz_lat, biz_lon):
                     v_lat = vdb['lat'] if vdb['lat'] != 0.0 else biz_lat
                     v_lon = vdb['lon'] if vdb['lon'] != 0.0 else biz_lon
 
-                # Capacity: from API priceRanges or our DB
-                try:
-                    capacity = int(vd.get('upcomingEvents', {}).get('ticketmaster', 1000))
-                except Exception:
-                    capacity = VENUE_DB.get(venue, VENUE_DB['DEFAULT'])['capacity']
+                # Capacity: VENUE_DB lookup first (most reliable),
+                # then heuristic from venue name keywords, then safe default.
+                def _resolve_capacity(venue_name):
+                    # Exact match
+                    if venue_name in VENUE_DB:
+                        return VENUE_DB[venue_name]['capacity']
+                    # Case-insensitive partial match
+                    vn_low = venue_name.lower()
+                    for db_key, db_val in VENUE_DB.items():
+                        if db_key == 'DEFAULT':
+                            continue
+                        if db_key.lower() in vn_low or vn_low in db_key.lower():
+                            return db_val['capacity']
+                    # Keyword heuristics so a mis-named big venue isn't penalised
+                    if any(k in vn_low for k in ['wembley', 'stadium']):
+                        return 60000
+                    if any(k in vn_low for k in ['arena', 'o2', 'ovo', 'utilita']):
+                        return 12000
+                    if any(k in vn_low for k in ['academy', 'forum', 'roundhouse', 'koko']):
+                        return 3000
+                    return 1500   # reasonable unknown venue default
+                capacity = _resolve_capacity(venue)
 
                 seen_ids.add(ev_id)
                 all_events.append({
